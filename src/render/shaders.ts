@@ -269,11 +269,11 @@ void main() {
     vec2 bp = uv * vec2(uRes.x / uRes.y, 1.0) * 4.0 + uBloodSeed * 13.7;
     float n = fbm(bp) * 0.75 + fbm(bp * 3.1 + 3.1) * 0.35;
     float e2 = smoothstep(0.18, 0.75, length(c) * 1.35);
-    float th = 1.02 - uBlood * 0.32 * (0.25 + e2) - e2 * 0.16;
+    float th = 1.08 - uBlood * 0.24 * (0.2 + e2) - e2 * 0.12;
     float mask = smoothstep(th, th + 0.025, n);
     float drip = smoothstep(0.72, 0.95, fbm(vec2(uv.x * 38.0 + uBloodSeed, uv.y * 1.5 + uTime * 0.03))) * e2;
     mask = max(mask, drip * step(th - 0.12, n));
-    vec3 bc = vec3(0.11, 0.0, 0.004) + vec3(0.09, 0.0, 0.0) * fbm(bp * 6.0);
+    vec3 bc = vec3(0.05, 0.0, 0.002) + vec3(0.07, 0.0, 0.0) * fbm(bp * 6.0);
     col = mix(col, bc, clamp(mask * min(1.0, uBlood * 2.0), 0.0, 0.9));
   }
   // film grain

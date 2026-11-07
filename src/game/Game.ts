@@ -207,14 +207,14 @@ export class Game implements Ctx {
     this.applySettings();
 
     // lighting
-    this.moon = new THREE.DirectionalLight(new THREE.Color(0.55, 0.64, 0.85), 0.5);
+    this.moon = new THREE.DirectionalLight(new THREE.Color(0.55, 0.64, 0.85), 0.75);
     this.moon.castShadow = true;
     const sc = this.moon.shadow.camera;
     sc.left = -48; sc.right = 48; sc.top = 48; sc.bottom = -48; sc.near = 1; sc.far = 220;
     this.moon.shadow.bias = -0.0006;
     this.moon.shadow.normalBias = 0.04;
     this.scene.add(this.moon, this.moon.target);
-    this.hemi = new THREE.HemisphereLight(new THREE.Color(0.25, 0.3, 0.42), new THREE.Color(0.08, 0.07, 0.06), 0.13);
+    this.hemi = new THREE.HemisphereLight(new THREE.Color(0.25, 0.3, 0.42), new THREE.Color(0.08, 0.07, 0.06), 0.22);
     this.scene.add(this.hemi);
     for (let i = 0; i < 4; i++) {
       const pl = new THREE.PointLight(0xffffff, 0, 10, 1.8);

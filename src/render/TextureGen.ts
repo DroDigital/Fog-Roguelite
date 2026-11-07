@@ -129,8 +129,8 @@ Surf surf(vec2 uv) {
   float dry = smoothstep(-0.3, 0.5, fbm(uv * 3.0 + 11.0, vec2(3.0), 4));
   Surf s;
   s.h = strands * 0.8 + clump * 0.4;
-  vec3 green = mix(vec3(0.035, 0.05, 0.022), vec3(0.08, 0.095, 0.045), strands);
-  vec3 straw = mix(vec3(0.09, 0.075, 0.045), vec3(0.20, 0.16, 0.09), strands);
+  vec3 green = mix(vec3(0.035, 0.045, 0.022), vec3(0.06, 0.07, 0.035), strands);
+  vec3 straw = mix(vec3(0.07, 0.06, 0.04), vec3(0.13, 0.11, 0.07), strands);
   s.albedo = mix(green, straw, dry) * (0.75 + 0.35 * clump);
   s.rough = 0.85 - strands * 0.15;
   s.metal = 0.0;

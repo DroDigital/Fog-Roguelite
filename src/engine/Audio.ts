@@ -126,7 +126,7 @@ export class AudioSys {
   update(dt: number, time: number, danger: number, healthFrac: number) {
     if (!this.ctx || !this.windFilter || !this.windGain) return;
     const t = this.ctx.currentTime;
-    this.windFilter.frequency.setTargetAtTime(300 + 260 * Math.sin(time * 0.13) + 180 * Math.sin(time * 0.31), t, 0.5);
+    this.windFilter.frequency.setTargetAtTime(430 + 170 * Math.sin(time * 0.13) + 110 * Math.sin(time * 0.31), t, 0.5);
     this.windGain.gain.setTargetAtTime(0.13 + 0.07 * Math.sin(time * 0.21) + danger * 0.05, t, 0.6);
     if (healthFrac < 0.35) {
       this.heartbeatT -= dt;
