@@ -208,7 +208,7 @@ export class UI {
       const nodesEl = col.querySelector('.nodes') as HTMLElement;
       const svg = col.querySelector('svg')!;
       const nodes = SKILL_TREE.filter((n) => n.branch === b);
-      const px = (n: SkillNode) => ({ x: n.x * 260, y: 14 + n.y * 100 });
+      const px = (n: SkillNode) => ({ x: 58 + n.x * 144, y: 14 + n.y * 100 });
       for (const n of nodes) {
         for (const r of n.requires) {
           const p = SKILL_TREE.find((k) => k.id === r)!;

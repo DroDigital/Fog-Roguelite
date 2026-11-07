@@ -362,8 +362,15 @@ export class Game implements Ctx {
 
   // ─────────────────────────────────────────────────────── run lifecycle
 
+  private samplesRequested = false;
+
   startRun() {
     audio.init();
+    if (!this.samplesRequested && audio.ctx) {
+      // authored sound effects listed in public/assets/manifest.json override the synthesized cues
+      this.samplesRequested = true;
+      for (const [cue, file] of Object.entries(assets.manifest.audio ?? {})) void audio.loadSample(cue as Parameters<typeof audio.play>[0], './assets/' + file);
+    }
     if (this.save.runs > 0 || this.state === 'dead') {
       this.seed = (Math.random() * 1e6) | 0;
       this.clearRun();

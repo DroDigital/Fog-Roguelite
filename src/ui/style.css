@@ -64,7 +64,7 @@ canvas#game { position: fixed; inset: 0; width: 100%; height: 100%; display: blo
 .card .lbl { font-family: var(--serif); font-size: 10px; letter-spacing: 0.3em; color: var(--dim); margin-bottom: 6px; }
 
 /* ── Menus */
-.menu { position: absolute; inset: 0; flex-direction: column; align-items: center; justify-content: center; background: radial-gradient(ellipse at center, rgba(0,0,0,0.2), rgba(0,0,0,0.85)); }
+.menu { position: absolute; inset: 0; flex-direction: column; align-items: center; justify-content: center; background: radial-gradient(ellipse at center, rgba(0,0,0,0.05), rgba(0,0,0,0.7)); }
 .title { font-family: var(--serif); font-weight: 400; font-size: clamp(38px, 7vw, 92px); letter-spacing: 0.32em; margin: 0 0 0 0.32em; color: #e6dcc6; text-shadow: 0 0 40px rgba(0,0,0,0.9); text-align: center; }
 .subtitle { font-family: var(--body); font-style: italic; font-size: 18px; color: var(--dim); margin: 6px 0 46px; text-align: center; }
 .btns { display: flex; flex-direction: column; gap: 6px; align-items: center; }

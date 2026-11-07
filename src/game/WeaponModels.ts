@@ -258,7 +258,7 @@ export function buildLantern(mats: WeaponMats): { group: THREE.Group; flame: THR
     bar.position.set(Math.cos(a) * 0.052, 0, Math.sin(a) * 0.052);
     g.add(bar);
   }
-  const glass = new THREE.Mesh(new THREE.CylinderGeometry(0.048, 0.05, 0.13, 12, 1, true), new THREE.MeshStandardMaterial({ color: 0x664422, transparent: true, opacity: 0.18, roughness: 0.1, emissive: new THREE.Color(0.25, 0.1, 0.02), side: THREE.DoubleSide, depthWrite: false }));
+  const glass = new THREE.Mesh(new THREE.CylinderGeometry(0.048, 0.05, 0.13, 12, 1, true), new THREE.MeshBasicMaterial({ color: new THREE.Color(0.35, 0.16, 0.05), transparent: true, opacity: 0.5, blending: THREE.AdditiveBlending, side: THREE.DoubleSide, depthWrite: false }));
   g.add(glass);
   const flame = new THREE.Mesh(new THREE.SphereGeometry(0.016, 8, 6), new THREE.MeshBasicMaterial({ color: new THREE.Color(9, 3.6, 0.9) }));
   flame.scale.y = 1.8;

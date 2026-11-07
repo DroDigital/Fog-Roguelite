@@ -41,7 +41,7 @@ function getMats(tex: TextureGen) {
     mats = {
       wood: tex.material('wood', 512, { metalness: 0 }),
       iron: tex.material('steel', 512, { color: new THREE.Color(0.3, 0.27, 0.25) }),
-      flame: new THREE.MeshBasicMaterial({ color: new THREE.Color(24, 9, 2) }),
+      flame: new THREE.MeshBasicMaterial({ color: new THREE.Color(7, 2.4, 0.5) }),
       blood: new THREE.MeshStandardMaterial({ color: 0x2a0000, roughness: 0.08, metalness: 0, emissive: new THREE.Color(0.25, 0, 0) }),
     };
   }
@@ -91,7 +91,7 @@ export function createInteractable(poi: POI, tex: TextureGen, used: boolean): In
         label: () => (poi.tier === 0 ? 'The Last Vigil' : it.used ? 'Spent Shrine' : poi.tier >= 2 ? 'Kneel at the Stone Circle' : 'Pray at the Shrine'),
       };
       it.light = { pos: pos.clone().add(new THREE.Vector3(0, 2.2, 0)), color: poi.tier >= 2 ? new THREE.Color(0.55, 0.7, 1.0) : new THREE.Color(1, 0.55, 0.22), intensity: used && poi.tier !== 0 ? 0 : 14, radius: 14, flicker: 0.25, real: true };
-      if (poi.tier >= 2) flame.material = new THREE.MeshBasicMaterial({ color: new THREE.Color(5, 9, 24) });
+      if (poi.tier >= 2) flame.material = new THREE.MeshBasicMaterial({ color: new THREE.Color(1.2, 2.6, 8) });
       return it;
     }
     case 'altar': {
