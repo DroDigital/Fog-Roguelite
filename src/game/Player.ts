@@ -14,7 +14,7 @@ import { applyMods, baseStats, type Mod, type Stats } from './Stats';
 import type { Weapon, MeleeArchetype } from './Loot';
 import { buildMelee, buildCrossbow, buildLantern, type WeaponMats, type CrossbowModel } from './WeaponModels';
 import type { HitResult } from './Ctx';
-import { IDLE, BLOCK, MOVES, COMBO, evalMove, moveLength, buildArm, buildGauntlet, poseArm, BladeTrail, type Pose, type MoveDef, type Arm } from './SwingAnim';
+import { IDLE, BLOCK, SPRINT, MOVES, COMBO, evalMove, moveLength, buildArm, buildGauntlet, poseArm, BladeTrail, PoseSpring, TORSO_PIVOT, WRIST_IN_HAND, wrapNear, lerpPose, dampPose, K, clonePose, type Pose, type MoveDef, type Arm } from './SwingAnim';
 
 interface AtkState {
   def: MoveDef;
@@ -26,6 +26,7 @@ interface AtkState {
   bounced: boolean;
   bite: number; // time left in the blade's bite (swing slows while it cuts through)
   connected: boolean;
+  rebound: number; // > 0 while the blade recoils back along its path off stone or wood
 }
 
 export interface PlayerHost {
@@ -57,13 +58,7 @@ function easeStrike(t: number) {
   // fast through the middle of the arc
   return t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
 }
-function lerpPose(a: Pose, b: Pose, t: number, out: Pose) {
-  out.y = lerp(a.y, b.y, t);
-  out.p = lerp(a.p, b.p, t);
-  out.r = lerp(a.r, b.r, t);
-  out.e = lerp(a.e, b.e, t);
-  return out;
-}
+
 
 export class Player {
   pos = new THREE.Vector3(0, 0, 0);
@@ -114,14 +109,20 @@ export class Player {
   private swayY = 0;
   // view model
   vm = new THREE.Group();
-  private pivot = new THREE.Object3D();
+  /** Torso: twists and leans about the lower spine, carrying both arms. */
+  private torso = new THREE.Group();
+  private chest = new THREE.Group();
   private handGroup = new THREE.Group();
   private meleeModel: THREE.Group | null = null;
   private crossbow: CrossbowModel | null = null;
   private lantern: { group: THREE.Group; flame: THREE.Mesh };
   private lanternHolder = new THREE.Group();
   light: THREE.PointLight;
-  private curPose: Pose = { ...IDLE };
+  private curPose: Pose = clonePose(IDLE);
+  private shownPose: Pose = clonePose(IDLE);
+  private spring = new PoseSpring();
+  private sprinting = false;
+  private walkK = 0;
   private armR!: Arm;
   private armL!: Arm;
   private gauntlet!: THREE.Group;
@@ -129,7 +130,7 @@ export class Player {
   private trailOn = 0;
   private swingYawV = 0;
   private swingPitchV = 0;
-  private lastPose: Pose = { ...IDLE };
+  private lastPose: Pose = clonePose(IDLE);
   private stepV = 0;
   private bladeTip = new THREE.Vector3();
   private bladeTipPrev = new THREE.Vector3();
@@ -139,14 +140,16 @@ export class Player {
 
   constructor(private host: PlayerHost, private mats: WeaponMats) {
     host.camera.add(this.vm);
-    this.pivot.position.set(0.3, -0.42, 0.02);
-    this.vm.add(this.pivot);
-    this.pivot.add(this.handGroup);
+    this.torso.position.copy(TORSO_PIVOT);
+    this.chest.position.copy(TORSO_PIVOT).negate();
+    this.torso.add(this.chest);
+    this.vm.add(this.torso);
+    this.chest.add(this.handGroup);
     this.lantern = buildLantern(mats);
-    this.lanternHolder.position.set(-0.36, -0.37, -0.52);
+    this.lanternHolder.position.set(-0.34, -0.37, -0.46);
     this.lanternHolder.scale.setScalar(0.8);
     this.lanternHolder.add(this.lantern.group);
-    this.vm.add(this.lanternHolder);
+    this.chest.add(this.lanternHolder);
     this.light = new THREE.PointLight(new THREE.Color(1.0, 0.6, 0.3), 6.5, 20, 1.35);
     this.light.position.set(0, 0.0, 0);
     this.lantern.group.add(this.light);
@@ -164,8 +167,8 @@ export class Player {
     this.boot.visible = false;
     this.vm.add(this.boot);
     // arms: the sword hand on the right, the lantern hand on the left
-    this.armR = buildArm(this.vm, mats, 1);
-    this.armL = buildArm(this.vm, mats, -1);
+    this.armR = buildArm(this.chest, mats, 1);
+    this.armL = buildArm(this.chest, mats, -1);
     this.gauntlet = buildGauntlet(mats);
     this.handGroup.add(this.gauntlet);
   }
@@ -347,6 +350,7 @@ export class Player {
     const wishX = mx * cos + mz * sin;
     const wishZ = -mx * sin + mz * cos;
     const sprinting = this.alive && inp.isDown('ShiftLeft') && mz < 0 && this.stamina > 1 && !this.blocking && this.aim < 0.5 && !this.atk && this.healT <= 0;
+    this.sprinting = sprinting;
     let speed = s.moveSpeed * (sprinting ? 1.6 : 1);
     if (this.blocking) speed *= 0.55;
     if (this.atk) speed *= this.atk.def.heavy ? 0.35 : 0.7;
@@ -547,7 +551,10 @@ export class Player {
             this.stamina -= cost;
             this.staminaDelay = 0.7;
             const t0 = heavy ? def.keys[def.holdKey!].t : 0;
-            this.atk = { def, name, t: t0, prevT: t0, start: { ...this.curPose }, hit: new Set(), bounced: false, bite: 0, connected: false };
+            const start = clonePose(this.curPose);
+            start.roll = wrapNear(start.roll, def.keys[1].pose.roll);
+            start.yaw = wrapNear(start.yaw, def.keys[1].pose.yaw);
+            this.atk = { def, name, t: t0, prevT: t0, start, hit: new Set(), bounced: false, bite: 0, connected: false, rebound: 0 };
             this.combo = chain ? this.combo + 1 : 1;
             if (heavy) this.combo = 0;
             this.atkCharge = Math.min(1, this.charge / 0.9);
@@ -558,12 +565,13 @@ export class Player {
       }
     }
 
-    let target: Pose = this.blocking ? BLOCK : IDLE;
+    let target: Pose = this.blocking ? BLOCK : this.sprinting ? SPRINT : IDLE;
     if (this.charge > 0.28 && !this.atk) {
-      // wind up the heavy while holding: blade drawn back over the shoulder, trembling with strain
+      // wind up the heavy while holding: blade drawn back over the head, trembling with strain
       const k = Math.min(1, (this.charge - 0.28) / 0.45);
-      const held = evalMove(MOVES.heavy, MOVES.heavy.keys[MOVES.heavy.holdKey!].t * k, this.curPose, { ...IDLE });
-      held.p += Math.sin(this.host.time * 37) * 0.006 * k;
+      const held = evalMove(MOVES.heavy, MOVES.heavy.keys[MOVES.heavy.holdKey!].t * k, this.curPose, clonePose(IDLE));
+      held.pitch += Math.sin(this.host.time * 37) * 0.008 * k;
+      held.x += Math.sin(this.host.time * 23) * 0.002 * k;
       target = held;
     }
     this.stepV = damp(this.stepV, 0, 10, dt);
@@ -574,42 +582,57 @@ export class Player {
       // while the blade bites into flesh the swing drags, then tears through
       const rate = a.bite > 0 ? 0.16 : 1;
       a.bite = Math.max(0, a.bite - dt);
-      a.t += dt * spd * rate;
-      const pose = evalMove(def, a.t, a.start, { ...IDLE });
-      if (a.bounced) {
-        // recoil off stone or earth: the arm jolts back
-        pose.e -= 0.08;
-        pose.p += 0.15;
+      if (a.rebound > 0) {
+        // deflected: the blade springs back along its own path, then the arm recovers
+        a.rebound -= dt;
+        a.t = Math.max(def.keys[1].t, a.t - dt * spd * 0.55);
+        if (a.rebound <= 0) {
+          this.atk = null;
+          this.comboT = 0.35;
+        }
+      } else a.t += dt * spd * rate;
+      if (this.atk) {
+        const pose = evalMove(def, a.t, a.start, clonePose(IDLE));
+        if (a.t >= def.hit[0] && a.t <= def.hit[1] && !a.bounced) {
+          this.stepV = Math.max(this.stepV, def.step * (a.connected ? 0.3 : 1));
+          this.sweep(a, dt);
+        }
+        // flick blood off the blade in the follow-through
+        if (a.connected && a.t > def.hit[1] && a.t < def.hit[1] + 0.15) this.flingT = 0.15;
+        this.trailOn = a.t >= def.hit[0] - 0.03 && a.t <= def.hit[1] + 0.05 && a.rebound <= 0 ? 1 : 0;
+        target = pose;
+        this.curPose = clonePose(target);
+        if (a.t >= moveLength(def)) {
+          this.atk = null;
+          this.comboT = 0.5;
+          this.curPose.roll = wrapNear(this.curPose.roll, IDLE.roll);
+          this.curPose.yaw = wrapNear(this.curPose.yaw, IDLE.yaw);
+        }
       }
-      if (a.t >= def.hit[0] && a.t <= def.hit[1] && !a.bounced) {
-        this.stepV = Math.max(this.stepV, def.step * (a.connected ? 0.3 : 1));
-        this.sweep(a, dt);
-      }
-      // flick blood off the blade in the follow-through
-      if (a.connected && a.t > def.hit[1] && a.t < def.hit[1] + 0.15) this.flingT = 0.15;
-      this.trailOn = a.t >= def.hit[0] - 0.03 && a.t <= def.hit[1] + 0.05 ? 1 : 0;
-      target = pose;
-      if (a.t >= moveLength(def) || (a.bounced && a.t > def.hit[1] + 0.12)) {
-        this.atk = null;
-        this.comboT = 0.5;
-      }
-      this.curPose = { ...target };
-    } else {
-      this.trailOn = 0;
-      // springy follow when not attacking
-      this.curPose.y = damp(this.curPose.y, target.y, 14, dt);
-      this.curPose.p = damp(this.curPose.p, target.p, 14, dt);
-      this.curPose.r = damp(this.curPose.r, target.r, 14, dt);
-      this.curPose.e = damp(this.curPose.e, target.e, 14, dt);
-      // idle breathing
-      this.curPose.p += Math.sin(this.host.time * 1.6) * 0.0015;
     }
-    // angular velocity of the swing drives the body torque on the camera
+    if (!this.atk) {
+      this.trailOn = 0;
+      // the guard settles with a little weight rather than snapping
+      dampPose(this.curPose, target, this.blocking ? 18 : 11, dt);
+    }
+    // living hand: breathing, a slow weight shift, and the blade bobbing with each step
+    const tm = this.host.time;
+    const still = this.atk ? 0.2 : 1;
+    this.walkK = damp(this.walkK, Math.min(1, Math.hypot(this.vel.x, this.vel.z) / 4.5), 6, dt);
+    const ph = this.bobPhase;
+    this.shownPose = this.spring.apply(this.curPose, this.shownPose);
+    const sp = this.shownPose;
+    sp.pitch += (Math.sin(tm * 1.6) * 0.012 + Math.sin(tm * 0.37) * 0.01) * still + Math.sin(ph * 2 - 0.6) * 0.03 * this.walkK * still;
+    sp.y += Math.sin(tm * 1.6 + 0.4) * 0.003 * still - Math.abs(Math.sin(ph - 0.3)) * 0.012 * this.walkK * still;
+    sp.yaw += Math.sin(tm * 0.53) * 0.012 * still + Math.cos(ph - 0.5) * 0.025 * this.walkK * still;
+    sp.tw += Math.cos(ph) * 0.02 * this.walkK;
+    this.spring.update(dt);
+    // angular velocity of the body and blade drives the torque on the camera
     const idt = 1 / Math.max(dt, 1e-3);
-    this.swingYawV = damp(this.swingYawV, (this.curPose.y - this.lastPose.y) * idt, 18, dt);
-    this.swingPitchV = damp(this.swingPitchV, (this.curPose.p - this.lastPose.p) * idt, 18, dt);
-    this.lastPose = { ...this.curPose };
-    this.applyPose(this.curPose);
+    this.swingYawV = damp(this.swingYawV, ((this.curPose.tw - this.lastPose.tw) * 1.0 + (this.curPose.yaw - this.lastPose.yaw) * 0.22) * idt, 18, dt);
+    this.swingPitchV = damp(this.swingPitchV, ((this.curPose.lean - this.lastPose.lean) * -1.2 + (this.curPose.pitch - this.lastPose.pitch) * 0.18) * idt, 18, dt);
+    this.lastPose = clonePose(this.curPose);
+    this.applyPose(sp);
     this.updateArmsAndTrail(dt);
   }
 
@@ -618,22 +641,38 @@ export class Player {
     if (this.atk) {
       this.atk.bite = Math.max(this.atk.bite, amount);
       this.atk.connected = true;
+      // the blade catches in flesh: wrist jolts back against the line of the cut
+      const v = this.swingYawV;
+      this.spring.kick({ yaw: -Math.sign(v || 1) * 2.2 * amount, pitch: 1.2 * amount, z: 0.5 * amount, tw: -Math.sign(v || 1) * 0.8 * amount });
     }
   }
 
   private updateArmsAndTrail(dt: number) {
-    // right arm: shoulder → wrist behind the grip
     this.vm.updateMatrixWorld(true);
-    const wrist = _v.set(0, -0.012, 0.09).applyMatrix4(this.handGroup.matrix).applyMatrix4(this.pivot.matrix);
-    poseArm(this.armR, wrist);
-    // left arm holds the lantern ring
+    // right arm: shoulder → wrist behind the grip (both in chest space)
+    const wrist = _v.copy(WRIST_IN_HAND).applyMatrix4(this.handGroup.matrix);
+    // never let the fist float free of the arm: if a pose overreaches, the hand is drawn in
+    const sh = this.armR.shoulder;
+    const over = wrist.distanceTo(sh) - (this.armR.l1 + this.armR.l2) * 0.985;
+    if (over > 0) {
+      _w.subVectors(sh, wrist).setLength(over);
+      this.handGroup.position.add(_w);
+      this.handGroup.updateMatrix();
+      this.handGroup.updateMatrixWorld(true);
+      wrist.add(_w);
+    }
+    const dorsal = _q.set(0, 1, 0).applyQuaternion(this.handGroup.quaternion);
+    poseArm(this.armR, wrist, dorsal);
+    // left arm holds the lantern ring; it pulls in toward the body as the torso twists
+    const tw = this.shownPose.tw;
+    this.lanternHolder.position.set(-0.34 - Math.min(0, tw) * 0.12, -0.37 - Math.abs(tw) * 0.06, -0.46 + Math.abs(tw) * 0.1);
     const lw = _w.copy(this.lanternHolder.position).add(_p.set(0.02, 0.1, 0.02));
-    poseArm(this.armL, lw);
+    poseArm(this.armL, lw, _q.set(-0.6, 0.8, 0));
     // trail and blade tip in world space
     const reach = this.melee.melee!.reach;
-    const base = _p.set(0, 0, -(this.curPose.e + 0.1)).applyMatrix4(this.pivot.matrixWorld);
+    const base = _p.set(0, 0, -0.1).applyMatrix4(this.handGroup.matrixWorld);
     this.bladeTipPrev.copy(this.bladeTip);
-    this.bladeTip.set(0, 0, -(this.curPose.e + 0.1 + reach)).applyMatrix4(this.pivot.matrixWorld);
+    this.bladeTip.set(0, 0, -(0.1 + reach)).applyMatrix4(this.handGroup.matrixWorld);
     if (!this.trail.mesh.parent && this.host.camera.parent) this.host.camera.parent.add(this.trail.mesh);
     if (this.trailOn && this.active === 'melee') this.trail.push(base, this.bladeTip);
     this.trail.update(dt, this.host.bloodiness?.() ?? 0);
@@ -673,20 +712,27 @@ export class Player {
     const wantPitch = Math.atan2(to.y, Math.hypot(to.x, to.z));
     this.yaw += angleDiff(this.yaw, wantYaw) * Math.min(1, dt * 10);
     this.pitch = damp(this.pitch, wantPitch, 10, dt);
-    const back: Pose = { y: 0.05, p: 0.25, r: Math.PI / 2, e: 0.12 };
-    const thrust: Pose = { y: 0.0, p: 0.05, r: Math.PI / 2, e: 0.78 };
+    // draw the blade back at the hip, then drive it in with the whole body behind it
+    const back = K([0.62, -0.5, 0.26], [0.2, -0.05], [1, 0, 0], -0.16, -0.05);
+    const thrust = K([0.32, -0.42, 0.56], [-0.06, 0.02], [1, 0, 0], 0.1, 0.2);
     let pose: Pose;
-    if (t < 0.28) pose = lerpPose(this.curPose, back, THREE.MathUtils.smoothstep(t / 0.28, 0, 1), { ...IDLE });
-    else if (t < 0.4) pose = lerpPose(back, thrust, easeStrike((t - 0.28) / 0.12), { ...IDLE });
-    else if (t < 0.85) pose = { ...thrust, p: thrust.p + Math.sin((t - 0.4) * 30) * 0.01 };
-    else pose = lerpPose(thrust, IDLE, THREE.MathUtils.smoothstep((t - 0.85) / 0.35, 0, 1), { ...IDLE });
+    if (t < 0.28) pose = lerpPose(this.curPose, back, THREE.MathUtils.smoothstep(t / 0.28, 0, 1), clonePose(IDLE));
+    else if (t < 0.4) pose = lerpPose(back, thrust, easeStrike((t - 0.28) / 0.12), clonePose(IDLE));
+    else if (t < 0.85) {
+      // twist the blade in the wound
+      pose = clonePose(thrust);
+      pose.roll += Math.min(1, (t - 0.45) / 0.25) * 0.9 * (t > 0.45 ? 1 : 0);
+      pose.pitch += Math.sin((t - 0.4) * 30) * 0.01;
+    } else pose = lerpPose(thrust, IDLE, THREE.MathUtils.smoothstep((t - 0.85) / 0.35, 0, 1), clonePose(IDLE));
     if (!ex.struck && t >= 0.36) {
       ex.struck = true;
       this.addTrauma(0.55);
       this.host.onExecuteStrike();
     }
-    this.curPose = { ...pose };
+    this.curPose = clonePose(pose);
+    this.shownPose = clonePose(pose);
     this.applyPose(pose);
+    this.updateArmsAndTrail(dt);
     if (t > 1.2) this.executing = null;
   }
 
@@ -716,8 +762,10 @@ export class Player {
   }
 
   private applyPose(p: Pose) {
-    this.pivot.rotation.set(p.p, p.y, p.r, 'YXZ');
-    this.handGroup.position.set(0, 0, -p.e);
+    this.torso.rotation.set(-p.lean, p.tw, 0, 'YXZ');
+    this.handGroup.position.set(p.x, p.y, p.z);
+    this.handGroup.rotation.set(p.pitch, p.yaw, p.roll, 'YXZ');
+    this.handGroup.updateMatrix();
   }
 
   /** Blade sweep between the previous and current pose with sub-stepping along the swing curve. */
@@ -727,7 +775,7 @@ export class Player {
     const reach = w.reach * 1.15;
     const steps = 6;
     const t0 = Math.max(a.prevT, def.hit[0]), t1 = Math.min(a.t, def.hit[1]);
-    const tmpPose: Pose = { ...IDLE };
+    const tmpPose: Pose = clonePose(IDLE);
     const cam = this.host.camera;
     cam.updateMatrixWorld();
     const prevTip = new THREE.Vector3();
@@ -738,20 +786,22 @@ export class Player {
       evalMove(def, tt, a.start, tmpPose);
       this.applyPose(tmpPose);
       this.vm.updateMatrixWorld(true);
-      const e = tmpPose.e + 0.08;
-      // test from the forearm outward so foes pressed up against you still get hit
-      _p.set(0, 0, -tmpPose.e * 0.35).applyMatrix4(this.pivot.matrixWorld);
-      _q.set(0, 0, -(e + reach)).applyMatrix4(this.pivot.matrixWorld);
+      // test from the fist outward so foes pressed up against you still get hit
+      _p.set(0, 0, 0.05).applyMatrix4(this.handGroup.matrixWorld);
+      _q.set(0, 0, -(0.08 + reach)).applyMatrix4(this.handGroup.matrixWorld);
       if (i === 0) {
         prevTip.copy(_q);
         continue;
       }
-      this.trail.push(_w.set(0, 0, -(e + 0.02)).applyMatrix4(this.pivot.matrixWorld), _q);
+      this.trail.push(_w.set(0, 0, -0.1).applyMatrix4(this.handGroup.matrixWorld), _q);
       // the blade can hit the ground or scenery and bounce off
       const gh = this.host.world.height(_q.x, _q.z);
       const hitProp = this.host.world.raycastProps(_p, _q) >= 0;
       if ((_q.y < gh - 0.05 || hitProp) && k > 0.12 && k < 0.88 && !def.heavy) {
         a.bounced = true;
+        a.rebound = 0.16;
+        // the jar runs up the blade into the wrist
+        this.spring.kick({ pitch: 4.5, yaw: -Math.sign(this.swingYawV || 1) * 3, z: 0.9, tw: -Math.sign(this.swingYawV || 1) * 0.6 });
         audio.play(hitProp ? 'boltWood' : 'hitBlock', { pitch: 0.6 });
         this.host.gore.sparks(_q, _w.set(0, 1, 0), hitProp ? 6 : 12);
         this.host.gore.dust(_q, 6);
@@ -764,6 +814,7 @@ export class Player {
         // a heavy blow drives into the earth: dust, fog blast, shake
         a.bounced = true;
         audio.play('swingHeavy', { pitch: 0.35, vol: 0.8 });
+        this.spring.kick({ pitch: 3.2, y: 0.5, lean: -0.8 });
         this.host.gore.dust(_q, 20);
         this.host.fog.burst(_q.x, _q.z, 10, 4);
         this.addTrauma(0.45);
