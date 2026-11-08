@@ -983,6 +983,16 @@ export class Game implements Ctx {
   /** Advance one frame (exposed so automated tests can step deterministically). */
   frame(realDt: number, render = true) {
     this.skipRender = !render;
+    this.input.pollGamepad(realDt);
+    if (this.input.wasPressed('PadStart')) {
+      if (this.state === 'playing') this.pause();
+      else if (this.state === 'paused') this.resume();
+      else if (this.state === 'menu' || this.state === 'dead') this.startRun();
+    }
+    if (this.state === 'levelup') {
+      const pick = this.input.wasPressed('PadLeft') ? 0 : this.input.wasPressed('PadUp') ? 1 : this.input.wasPressed('PadRight') ? 2 : -1;
+      if (pick >= 0) document.querySelectorAll<HTMLElement>('#l-choices .choice')[pick]?.click();
+    }
     let dt = realDt;
     const ex = this.player?.executing;
     if (ex && ex.t > 0.2 && ex.t < 0.75) dt *= 0.45;

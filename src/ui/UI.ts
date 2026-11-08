@@ -64,7 +64,7 @@ export class UI {
           <button class="mb" data-a="settings">Settings</button>
         </div>
         <div class="meta-line" id="m-meta"></div>
-        <div class="hint">WASD move · Shift sprint · Space dodge · LMB strike (hold for heavy) · RMB block / aim · F kick · 1 / 2 or wheel swap · R reload · Q vial · E interact / execute · Esc pause</div>
+        <div class="hint">WASD move · Shift sprint · Space dodge · LMB strike (hold for heavy) · RMB block / aim · F kick · 1 / 2 or wheel swap · R reload · Q vial · E interact / execute · Esc pause<br>Gamepad: sticks move / look · RT strike · LT block · A dodge · B kick · X interact · Y swap · LB vial · RB reload · L3 sprint · Start pause / begin</div>
       </div>
       <div class="screen menu" id="s-pause">
         <h2 class="title" style="font-size:42px">PAUSED</h2>

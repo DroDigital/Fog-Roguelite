@@ -426,7 +426,7 @@ export class Player {
     }
 
     // weapon swap
-    if (this.alive && (inp.wasPressed('Digit1') || inp.wasPressed('Digit2') || inp.wheel !== 0)) {
+    if (this.alive && (inp.wasPressed('Digit1') || inp.wasPressed('Digit2') || inp.wasPressed('PadSwap') || inp.wheel !== 0)) {
       const want = inp.wasPressed('Digit1') ? 'melee' : inp.wasPressed('Digit2') ? 'ranged' : this.active === 'melee' ? 'ranged' : 'melee';
       if (want !== this.active && !this.atk) {
         this.active = want;
