@@ -44,6 +44,10 @@ produces a static site in `dist/` that can be hosted anywhere.
 | Interact (chests, shrines, altars, beacons, loot) | `E` |
 | Pause | `Esc` |
 
+Gamepads with the standard mapping also work. Sticks move and look, RT strikes, LT blocks or aims, A dodges,
+B kicks, X interacts or executes, Y swaps weapons, LB drinks a vial, RB reloads and L3 sprints. Start pauses,
+resumes or begins a run, and the D-pad picks level-up boons.
+
 ## What's in the game
 
 **World.** An infinite heightfield streamed in 32 m chunks around the player, with three blended biomes
