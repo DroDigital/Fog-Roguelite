@@ -14,6 +14,7 @@ import { FogSim } from '../world/FogSim';
 import { Gore } from './Gore';
 import { Enemy, Corpse, type EnemyKind } from './Enemy';
 import { J } from './Body';
+import { loadCreatureAssets } from './CreatureModel';
 import { Player } from './Player';
 import { Projectiles } from './Projectiles';
 import { makeWeaponMats, type WeaponMats } from './WeaponModels';
@@ -369,6 +370,7 @@ export class Game implements Ctx {
     this.tex = new TextureGen(r, Math.min(8, r.capabilities.getMaxAnisotropy()));
     this.noise3D = makeFogNoise3D(64);
     await assets.load();
+    await loadCreatureAssets(['hollow', 'stalker', 'weeper', 'brute', 'warden']);
     this.fog = new FogSim((x, z) => (this.world ? this.world.height(x, z) : 0));
     this.pipeline = new Pipeline(r, this.noise3D, this.fog);
     this.applySettings();
@@ -421,7 +423,7 @@ export class Game implements Ctx {
         enemies: this.enemies,
         corpses: this.corpses,
         scene: this.scene,
-        onBoltHit: (e, seg, point, dir, damage, crit) => this.onBoltHit(e, seg, point, dir, damage, crit),
+        onBoltHit: (e, seg, point, dir, damage, crit, t, from) => this.onBoltHit(e, seg, point, dir, damage, crit, t, from),
         onBoltImpact: (p, d, ex, surf) => this.onBoltImpact(p, d, ex, surf),
         pan: (p) => this.pan(p),
       },
@@ -445,6 +447,7 @@ export class Game implements Ctx {
         onKick: (o, d) => this.onKick(o, d),
         onExecuteStrike: () => this.onExecuteStrike(),
         notify: (m) => this.ui.notify(m),
+        bloodiness: () => game.wmats.bloodU.value,
       },
       this.wmats,
     );
@@ -693,21 +696,23 @@ export class Game implements Ctx {
 
   // ─────────────────────────────────────────────────────── combat callbacks
 
-  private onMeleeHit(e: Enemy, seg: number, point: THREE.Vector3, dir: THREE.Vector3, mv: { heavy: boolean; dmgMult: number; severMult: number; riposte: boolean }) {
+  private onMeleeHit(e: Enemy, seg: number, point: THREE.Vector3, dir: THREE.Vector3, mv: { heavy: boolean; dmgMult: number; severMult: number; riposte: boolean; t: number }) {
     const w = this.player.melee.melee!;
     const s = this.player.stats;
     const crit = Math.random() < s.critChance + (mv.riposte ? 0.5 : 0);
     let dmg = w.damage * s.meleeDmg * mv.dmgMult * (crit ? s.critMult : 1) * (mv.riposte ? s.riposteMult : 1);
     if (s.executeBelow > 0 && e.hp / e.maxHp < s.executeBelow) dmg = 1e5;
-    const res = e.hit({ seg, point, dir, damage: dmg, sever: w.sever * s.severMult * mv.severMult, blunt: w.blunt, stagger: w.stagger * (mv.heavy ? 2 : 1), crit, source: 'melee', riposte: mv.riposte });
+    const res = e.hit({ seg, point, dir, damage: dmg, sever: w.sever * s.severMult * mv.severMult, blunt: w.blunt, stagger: w.stagger * (mv.heavy ? 2 : 1), crit, source: 'melee', riposte: mv.riposte, t: mv.t, from: this.camera.position.clone() });
     if (res.severed) this.severs++;
+    // the blade drags through flesh; harder when it cleaves bone
+    this.player.bite(w.blunt ? 0.05 : res.severed ? 0.11 : 0.075 + (mv.heavy ? 0.04 : 0));
     this.player.heal(dmg * s.lifesteal);
     if (!w.blunt && Math.random() < s.bleedChance) {
       e.bleed = 4;
       e.bleedT = 0.3;
     }
     const near = point.distanceTo(this.camera.position);
-    this.hitstop(0.05 + (mv.heavy ? 0.05 : 0) + (res.severed ? 0.05 : 0) + (crit ? 0.02 : 0));
+    this.hitstop(0.035 + (mv.heavy ? 0.05 : 0) + (res.severed ? 0.04 : 0) + (crit ? 0.02 : 0));
     this.shake(0.18 + (mv.heavy ? 0.2 : 0) + (res.severed ? 0.12 : 0));
     const sp = this.pan(point);
     audio.play('hitFlesh', { dist: sp.dist, pan: sp.pan, pitch: w.blunt ? 0.7 : 1 });
@@ -723,8 +728,8 @@ export class Game implements Ctx {
     this.wmats.bloodU.value = Math.min(1, this.wmats.bloodU.value + 0.02);
   }
 
-  private onBoltHit(e: Enemy, seg: number, point: THREE.Vector3, dir: THREE.Vector3, damage: number, crit: boolean) {
-    const res = e.hit({ seg, point, dir, damage, sever: 0.6 * this.player.stats.severMult, blunt: false, stagger: 1.4, crit, source: 'bolt' });
+  private onBoltHit(e: Enemy, seg: number, point: THREE.Vector3, dir: THREE.Vector3, damage: number, crit: boolean, t: number, from: THREE.Vector3) {
+    const res = e.hit({ seg, point, dir, damage, sever: 0.6 * this.player.stats.severMult, blunt: false, stagger: 1.4, crit, source: 'bolt', t, from });
     if (res.severed) this.severs++;
     this.player.heal(damage * this.player.stats.lifesteal);
     this.ui.hitMarker();
@@ -1054,7 +1059,13 @@ export class Game implements Ctx {
           b.pos.x -= (dx / d) * push; b.pos.z -= (dz / d) * push;
         }
       }
-    for (const c of this.corpses) c.update(dt, this);
+    for (const c of this.corpses) {
+      c.update(dt, this);
+      if (c.owner && !c.pooled && c.rag.sleeping && c.rag.pos[0]) {
+        c.pooled = true;
+        this.gore.pool(c.rag.pos[0].x, c.rag.pos[0].z, 1.3 + Math.random() * 0.8);
+      }
+    }
     // fade very old remains far away
     for (let i = this.corpses.length - 1; i >= 0; i--) {
       const c = this.corpses[i];

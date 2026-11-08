@@ -228,11 +228,12 @@ export function buildSegment(segIdx: number, len: number, scale: number, look: C
     }
     if (look.armour) {
       const plate = new THREE.SphereGeometry(rb * 1.05, 12, 8, 0, Math.PI * 2, 0, Math.PI * 0.5);
-      add(plate, mats.iron, 0, len * 0.72, 0, 1.25, 0.7, 0.8);
+      add(plate, mats.iron, 0, len * 0.72, 0, 1.25, 0.7, 0.8).name = 'chestplate';
       for (const sx of [-1, 1]) {
         const pa = new THREE.SphereGeometry(rb * 0.55, 10, 6, 0, Math.PI * 2, 0, Math.PI * 0.55);
         const m = add(pa, mats.iron, sx * rb * 1.15, len * 0.86, 0, 1, 0.8, 1);
         m.rotation.z = -sx * 0.5;
+        m.name = 'pauldron';
       }
     }
   } else if (part === 'head') {
@@ -240,6 +241,7 @@ export function buildSegment(segIdx: number, len: number, scale: number, look: C
     add(limbGeo(len * 0.55, ra, ra * 0.9, 0.05, look.gaunt, seed), mats.flesh);
     // skull
     const skull = new THREE.Group();
+    skull.name = 'skull';
     skull.position.set(0, len - rb * 0.4, 0);
     root.add(skull);
     const cran = new THREE.Mesh(new THREE.SphereGeometry(rb, 18, 14), mats.flesh);
@@ -267,6 +269,7 @@ export function buildSegment(segIdx: number, len: number, scale: number, look: C
       // swollen bile sac in the throat
       const sac = new THREE.Mesh(new THREE.SphereGeometry(rb * 0.75, 12, 10), new THREE.MeshPhysicalMaterial({ color: 0x4a6a2a, roughness: 0.2, transmission: 0, emissive: new THREE.Color(0.2, 0.6, 0.05), clearcoat: 1 }));
       sac.position.set(0, -rb * 1.1, rb * 0.55);
+      sac.userData.sac = true;
       sac.scale.set(1, 0.85, 1);
       skull.add(sac);
     }
@@ -280,6 +283,7 @@ export function buildSegment(segIdx: number, len: number, scale: number, look: C
     skull.add(jaw);
     // teeth
     const teeth = new THREE.Mesh(new THREE.BoxGeometry(rb * 0.9, rb * 0.12, rb * 0.1), mats.bone);
+    teeth.name = 'teeth';
     teeth.position.set(0, -rb * 0.45, rb * 0.72);
     skull.add(teeth);
     for (const sx of [-1, 1]) {
@@ -304,10 +308,12 @@ export function buildSegment(segIdx: number, len: number, scale: number, look: C
     if (look.armour) {
       const helm = new THREE.Mesh(new THREE.CylinderGeometry(rb * 1.02, rb * 1.08, rb * 1.5, 14, 1, true), mats.iron);
       helm.position.set(0, rb * 0.25, 0);
+      helm.name = 'helm';
       helm.castShadow = true;
       skull.add(helm);
       const top = new THREE.Mesh(new THREE.SphereGeometry(rb * 1.02, 14, 6, 0, Math.PI * 2, 0, Math.PI / 2), mats.iron);
       top.position.set(0, rb * 1.0, 0);
+      top.name = 'helm';
       skull.add(top);
     }
   } else {
@@ -350,6 +356,14 @@ export function buildSegment(segIdx: number, len: number, scale: number, look: C
       root.add(brace);
     }
   }
+  // tag the body parts a sculpted model replaces (armour, cloth, hair, teeth and eyes stay)
+  root.traverse((o) => {
+    const mesh = o as THREE.Mesh;
+    if (!mesh.isMesh) return;
+    if (mesh.material === mats.eye) mesh.userData.eye = true;
+    else if (mesh.material === mats.flesh || mesh.material === mats.gore || mesh.userData.sac) mesh.userData.flesh = true;
+    else if (mesh.material === mats.bone && mesh.name !== 'teeth') mesh.userData.flesh = true;
+  });
   root.userData.seg = segIdx;
   return root;
 }

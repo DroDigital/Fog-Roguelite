@@ -4,6 +4,7 @@
 import * as THREE from 'three';
 import { J, SEGS, REST, BRACES, Ragdoll, orientBetween, segSegDist2, solveIK } from './Body';
 import { buildSegment, makeCreatureMats, makeFlesh, makeWoundCap, type CreatureLook, type CreatureMats } from './CreatureMesh';
+import { CreatureModel, creatureAsset, makeSkinnedFlesh } from './CreatureModel';
 import type { Ctx } from './Ctx';
 import { audio } from '../engine/Audio';
 import { angleDiff, clamp, damp, lerp } from '../engine/Random';
@@ -81,9 +82,13 @@ export interface HitInfo {
   crit: boolean;
   source: 'melee' | 'bolt' | 'fire' | 'bleed';
   riposte?: boolean;
+  /** fraction along the segment where it was struck */
+  t?: number;
+  /** where the blow came from (wounds open on that side) */
+  from?: THREE.Vector3;
 }
 
-interface Link { vis: THREE.Object3D; ia: number; ib: number; side: THREE.Vector3; sideFrom?: [number, number]; flip?: boolean }
+interface Link { vis: THREE.Object3D; ia: number; ib: number; side: THREE.Vector3; sideFrom?: [number, number]; flip?: boolean; back?: number }
 
 /** Ragdolled remains: whole corpses and severed limbs. */
 export class Corpse {
@@ -91,6 +96,8 @@ export class Corpse {
   links: Link[] = [];
   age = 0;
   owner: Enemy | null = null;
+  model: CreatureModel | null = null;
+  pooled = false;
   private _x = new THREE.Vector3();
   private _s = new THREE.Vector3();
 
@@ -104,6 +111,8 @@ export class Corpse {
         if (l.flip) side.negate();
       }
       orientBetween(l.vis, this.rag.pos[l.ia], this.rag.pos[l.ib], side);
+      // mid-limb pieces: the bone's origin sits behind the cut
+      if (l.back) l.vis.position.addScaledVector(this._x.set(0, 1, 0).applyQuaternion(l.vis.quaternion), -l.back);
       if (!l.sideFrom) l.side.copy(this._x.set(1, 0, 0).applyQuaternion(l.vis.quaternion));
     }
   }
@@ -111,6 +120,12 @@ export class Corpse {
   dispose(scene: THREE.Object3D) {
     for (const l of this.links) scene.remove(l.vis);
     this.links.length = 0;
+    if (this.model && --this.model.refs <= 0) {
+      for (const b of this.model.bones) scene.remove(b);
+      scene.remove(this.model.mesh);
+      this.model.geometry.dispose();
+    }
+    this.model = null;
   }
 
   /** Closest particle to a point (for kicking bodies around). */
@@ -133,6 +148,7 @@ const _a = new THREE.Vector3();
 const _b = new THREE.Vector3();
 const _c = new THREE.Vector3();
 const _pole = new THREE.Vector3();
+const _cutB = new THREE.Vector3();
 const _seg = { s: 0, t: 0 };
 const _fwd = new THREE.Vector3();
 const _right = new THREE.Vector3();
@@ -179,6 +195,15 @@ export class Enemy {
   bleed = 0;
   bleedT = 0;
   staggerT = 0;
+  model: CreatureModel | null = null;
+  /** fraction of a segment left after a mid-limb cut (1 = whole) */
+  segCut: number[] = [];
+  private segMaxHp: number[] = [];
+  /** 0..1 injury per leg (left, right): drives the limp */
+  legInj = [0, 0];
+  crawling = false;
+  private dazedT = 0;
+  private entrails = 0;
   burning = 0;
   alerted = false;
   removed = false;
@@ -214,17 +239,67 @@ export class Enemy {
       this.prevJoints.push(new THREE.Vector3());
       this.jointAlive.push(true);
     }
+    const asset = creatureAsset(d.kind);
+    if (asset) {
+      // sculpted, rigged model from tools/blender/build_creatures.py
+      this.model = new CreatureModel(asset, S, makeSkinnedFlesh(ctx.tex, look, bloodU));
+      for (const b of this.model.bones) this.scene.add(b);
+      this.scene.add(this.model.mesh);
+    }
     for (let s = 0; s < SEGS.length; s++) {
       const def = SEGS[s];
       const a = REST[def.a], b = REST[def.b];
       const len = Math.hypot(b[0] - a[0], b[1] - a[1], b[2] - a[2]) * S;
       this.segLen.push(len);
       this.segAlive.push(true);
-      this.segHp.push(LIMB_HP[def.part] * d.limbHp * (this.elite ? 1.5 : 1));
+      this.segCut.push(1);
+      const hp = LIMB_HP[def.part] * d.limbHp * (this.elite ? 1.5 : 1);
+      this.segHp.push(hp);
+      this.segMaxHp.push(hp);
       const v = buildSegment(s, len, S, d.look, mats, this.id * 31 + (d.kind === 'brute' ? 7 : 0));
-      if (this.elite) v.scale.setScalar(1.04);
-      this.vis.push(v);
-      this.scene.add(v);
+      if (this.model) {
+        // keep only armour, cloth, hair and eyes; the body comes from the model
+        const bone = this.model.bones[s];
+        const drop: THREE.Object3D[] = [];
+        v.traverse((o) => {
+          if (o.userData.flesh) drop.push(o);
+        });
+        for (const o of drop) o.parent?.remove(o);
+        const skull = v.getObjectByName('skull');
+        if (skull) {
+          skull.position.copy(this.model.bindToLocal(1, asset!.head.clone().multiplyScalar(S)));
+          const eyes = skull.children.filter((c) => c.userData.eye);
+          eyes.forEach((e, i) => {
+            const ep = this.model!.bindToLocal(1, asset!.eyes[i % asset!.eyes.length].clone().multiplyScalar(S)).sub(skull.position);
+            e.position.copy(ep).add(_a.set(0, 0, -0.012 * S));
+            e.scale.setScalar(0.8);
+          });
+        }
+        // armour was sized for the capsule body: fit it to the sculpt
+        v.traverse((o) => {
+          if (o.name === 'chestplate' || o.name === 'teeth') o.visible = false;
+          if (o.name === 'pauldron') {
+            o.scale.multiplyScalar(0.78);
+            o.position.multiplyScalar(0.82);
+          }
+        });
+        if (skull) {
+          const hr = asset!.head.distanceTo(asset!.eyes[0]) * S * 1.2;
+          skull.traverse((o) => {
+            if (o.name === 'helm') {
+              const f = hr / (SEGS[1].rb * S * d.look.bulk);
+              o.scale.multiplyScalar(f);
+              o.position.multiplyScalar(f);
+            }
+          });
+        }
+        for (const c of [...v.children]) bone.add(c);
+        this.vis.push(bone);
+      } else {
+        if (this.elite) v.scale.setScalar(1.04);
+        this.vis.push(v);
+        this.scene.add(v);
+      }
     }
     this.pose(0);
     for (let j = 0; j < J.COUNT; j++) this.prevJoints[j].copy(this.joints[j]);
@@ -241,12 +316,59 @@ export class Enemy {
 
   // ──────────────────────────────────────────── animation
 
+  /** Legless: belly on the ground, clawing forward hand over hand, stumps dragging. */
+  private poseCrawl(dt: number) {
+    const d = this.def;
+    const S = d.scale;
+    const speed = Math.hypot(this.vel.x, this.vel.z);
+    this.phase += dt * (2 + speed * 3.2);
+    const ph = this.phase;
+    const fwd = this.forward(_fwd);
+    _right.set(-Math.cos(this.yaw), 0, Math.sin(this.yaw));
+    const P = this.pos;
+    const gy = (x: number, z: number) => this.ctx.world.height(x, z);
+    const lunge = this.state === 'attack' ? Math.sin(clamp(this.attackT / (this.aw + this.as), 0, 1) * Math.PI) : 0;
+    const pelvis = this.joints[J.Pelvis].set(P.x - fwd.x * 0.25 * S, gy(P.x, P.z) + 0.16 * S, P.z - fwd.z * 0.25 * S);
+    const spine = this.segLen[0];
+    const rise = 0.18 + 0.12 * Math.sin(ph) * 0.5 + lunge * 0.35;
+    const chest = this.joints[J.Chest].set(pelvis.x + fwd.x * spine * Math.cos(rise), pelvis.y + spine * Math.sin(rise) + 0.05 * S, pelvis.z + fwd.z * spine * Math.cos(rise));
+    chest.add(this.flinch);
+    const hl = this.segLen[1];
+    this.joints[J.Head].set(chest.x + fwd.x * hl * 0.75, chest.y + hl * 0.62, chest.z + fwd.z * hl * 0.75);
+    for (const side of [-1, 1]) {
+      const sh = side < 0 ? this.joints[J.LSh] : this.joints[J.RSh];
+      sh.set(chest.x + _right.x * 0.2 * S * side, chest.y - 0.03 * S, chest.z + _right.z * 0.2 * S * side);
+      const hip = side < 0 ? this.joints[J.LHip] : this.joints[J.RHip];
+      hip.set(pelvis.x + _right.x * 0.1 * S * side, pelvis.y, pelvis.z + _right.z * 0.1 * S * side);
+      // arms reach and pull alternately
+      const p = ph + (side < 0 ? 0 : Math.PI);
+      const reach = (0.42 + 0.18 * Math.sin(p) + lunge * 0.3) * S;
+      const ha = side < 0 ? this.joints[J.LHa] : this.joints[J.RHa];
+      const hx = sh.x + fwd.x * reach + _right.x * side * 0.12 * S, hz = sh.z + fwd.z * reach + _right.z * side * 0.12 * S;
+      ha.set(hx, gy(hx, hz) + 0.04 * S + Math.max(0, Math.cos(p)) * 0.12 * S + lunge * 0.25 * S, hz);
+      _pole.copy(_right).multiplyScalar(side).add(_c.set(0, 1, 0));
+      solveIK(sh, ha, this.segLen[2], this.segLen[3], _pole, side < 0 ? this.joints[J.LEl] : this.joints[J.REl]);
+      // legs (or what is left of them) drag behind
+      const ft = side < 0 ? this.joints[J.LFt] : this.joints[J.RFt];
+      const fx = hip.x - fwd.x * 0.75 * S + _right.x * side * 0.08 * S, fz = hip.z - fwd.z * 0.75 * S + _right.z * side * 0.08 * S;
+      ft.set(fx, gy(fx, fz) + 0.05 * S, fz);
+      _pole.set(0, -1, 0);
+      solveIK(hip, ft, this.segLen[6], this.segLen[7], _pole, side < 0 ? this.joints[J.LKn] : this.joints[J.RKn]);
+    }
+  }
+
   private pose(dt: number) {
+    if (this.crawling) {
+      this.poseCrawl(dt);
+      return;
+    }
     const d = this.def;
     const S = d.scale;
     const speed = Math.hypot(this.vel.x, this.vel.z);
     const runN = clamp(speed / d.run, 0, 1);
     this.phase += dt * (1.6 + speed * 1.55 / S);
+    const limp = Math.max(this.legInj[0], this.legInj[1]);
+    const limpSide = this.legInj[0] > this.legInj[1] ? -1 : 1;
     const ph = this.phase;
     const fwd = this.forward(_fwd);
     _right.set(-Math.cos(this.yaw), 0, Math.sin(this.yaw));
@@ -275,7 +397,11 @@ export class Enemy {
     const lean = 0.12 + runN * 0.35 + d.crouch * 1.2 + atkStrike * 0.35 - atkRaise * (d.kind === 'weeper' ? 0.55 : 0.15) - stag * 0.4 + kneel * 0.75;
     const sway = Math.sin(ph * 0.5) * 0.04 * S;
 
-    const pelvisY = REST[J.Pelvis][1] * S - crouch - bob;
+    // a wounded leg buckles each time weight lands on it
+    const limpPhase = ph + (limpSide < 0 ? 0 : Math.PI);
+    const limpDip = limp * 0.09 * S * Math.max(0, -Math.cos(limpPhase)) * Math.min(1, speed);
+    const daze = this.dazedT > 0 ? this.dazedT : 0;
+    const pelvisY = REST[J.Pelvis][1] * S - crouch - bob - limpDip;
     const pelvis = L(sway, pelvisY, -lean * 0.05 * S, this.joints[J.Pelvis]);
     // spine
     const spineLen = this.segLen[0];
@@ -285,7 +411,7 @@ export class Enemy {
     // head: look towards player when hunting
     const head = this.joints[J.Head];
     const hLen = this.segLen[1];
-    const headLean = lean * 0.4 + Math.sin(this.ctx.time * 1.7 + this.id) * 0.08;
+    const headLean = lean * 0.4 + Math.sin(this.ctx.time * 1.7 + this.id) * 0.08 + daze * 0.25 * Math.sin(this.ctx.time * 5);
     head.set(chest.x + fwd.x * Math.sin(headLean) * hLen + this.flinch.x * 0.6, chest.y + Math.cos(headLean) * hLen, chest.z + fwd.z * Math.sin(headLean) * hLen + this.flinch.z * 0.6);
     // shoulders / hips follow the spine
     const shY = chest.y - 0.04 * S, hipY = pelvis.y - 0.04 * S;
@@ -304,7 +430,8 @@ export class Enemy {
       const hip = side < 0 ? this.joints[J.LHip] : this.joints[J.RHip];
       const foot = side < 0 ? this.joints[J.LFt] : this.joints[J.RFt];
       const knee = side < 0 ? this.joints[J.LKn] : this.joints[J.RKn];
-      const z = Math.sin(p) * stride + (stag > 0 ? -0.15 * S : 0) + kneel * (side < 0 ? 0.35 : -0.25) * S;
+      const hurt = side === limpSide ? limp : 0;
+      const z = Math.sin(p) * stride * (1 - hurt * 0.6) + (stag > 0 ? -0.15 * S : 0) + kneel * (side < 0 ? 0.35 : -0.25) * S;
       const lifted = Math.max(0, Math.cos(p)) * lift;
       L(side * 0.13 * S, 0, z, foot);
       foot.y = this.ctx.world.height(foot.x, foot.z) + 0.07 * S + lifted;
@@ -465,9 +592,10 @@ export class Enemy {
             this.beginAttack('slam');
           }
         } else {
-          const slowRange = d.reach + 0.6;
+          const reach = this.crawling ? 1.3 * d.scale : d.reach;
+          const slowRange = reach + 0.6;
           targetSpeed = dist > slowRange ? d.run * (1 + ctx.difficulty * 0.05) : d.walk * 0.5;
-          if (dist < d.reach + 0.35 && facing && this.atkCooldown <= 0) this.beginAttack(d.kind === 'brute' ? 'slam' : 'swipe');
+          if (dist < reach + 0.35 && facing && this.atkCooldown <= 0) this.beginAttack(d.kind === 'brute' && !this.crawling ? 'slam' : 'swipe');
         }
         // lose interest when far away
         if (dist > 60) {
@@ -519,6 +647,13 @@ export class Enemy {
     // locomotion
     this.yaw += angleDiff(this.yaw, targetYaw) * Math.min(1, dt * (this.state === 'attack' ? 4 : 6));
     const fwd = this.forward(_fwd);
+    if (this.crawling) targetSpeed = Math.min(targetSpeed, this.state === 'chase' ? 1.15 : 0.4);
+    else targetSpeed *= 1 - 0.5 * Math.max(this.legInj[0], this.legInj[1]);
+    if (this.dazedT > 0) {
+      this.dazedT -= dt;
+      targetSpeed *= 0.35;
+      targetYaw += Math.sin(ctx.time * 3 + this.id) * 0.6;
+    }
     const nsp = (this.speed = damp(this.speed, targetSpeed, 5, dt));
     this.vel.x = fwd.x * nsp + fwd.x * this.lunge;
     this.vel.z = fwd.z * nsp + fwd.z * this.lunge;
@@ -534,13 +669,17 @@ export class Enemy {
     ctx.world.collide(this.pos, 0.35 * d.scale);
     // don't walk into the player
     const pd = Math.hypot(this.pos.x - ctx.playerPos.x, this.pos.z - ctx.playerPos.z);
-    const minD = 0.85 * d.scale;
+    const minD = (this.crawling ? 0.6 : 0.85) * d.scale;
     if (pd < minD && pd > 1e-4) {
       this.pos.x = ctx.playerPos.x + ((this.pos.x - ctx.playerPos.x) / pd) * minD;
       this.pos.z = ctx.playerPos.z + ((this.pos.z - ctx.playerPos.z) / pd) * minD;
     }
     this.pos.y = ctx.world.height(this.pos.x, this.pos.z);
 
+    // leave a trail of blood when maimed
+    if ((this.crawling || this.legInj[0] + this.legInj[1] > 0.6 || !this.segAlive[3] || !this.segAlive[5]) && nsp > 0.2 && Math.random() < dt * 3) {
+      ctx.gore.decal(this.pos.x + (Math.random() - 0.5) * 0.4, this.pos.z + (Math.random() - 0.5) * 0.4, 0.3 + Math.random() * 0.4);
+    }
     // stir the fog
     if (nsp > 0.3) ctx.fog.splat(this.pos.x, this.pos.z, this.vel.x * 0.25, this.vel.z * 0.25, 0.9 * d.scale, 0.03 * nsp * dt * 10);
 
@@ -613,7 +752,10 @@ export class Enemy {
   }
 
   private dmg() {
-    return this.def.damage * (1 + this.ctx.difficulty * 0.25) * (this.elite ? 1.4 : 1);
+    const arms = (this.segAlive[3] ? 1 : 0) + (this.segAlive[5] ? 1 : 0);
+    // maimed creatures hit softer: crawling, or clawing with stumps / biting
+    const maim = (this.crawling ? 0.7 : 1) * (arms === 0 ? 0.55 : arms === 1 ? 0.85 : 1);
+    return this.def.damage * (1 + this.ctx.difficulty * 0.25) * (this.elite ? 1.4 : 1) * maim;
   }
 
   private resolveHit(r: string) {
@@ -665,12 +807,13 @@ export class Enemy {
   // ──────────────────────────────────────────── combat
 
   /** Swept capsule test: blade/bolt segment p→q of radius r against limbs. */
-  testSegment(p: THREE.Vector3, q: THREE.Vector3, r: number): { seg: number; point: THREE.Vector3; d2: number } | null {
-    let best: { seg: number; point: THREE.Vector3; d2: number } | null = null;
+  testSegment(p: THREE.Vector3, q: THREE.Vector3, r: number): { seg: number; point: THREE.Vector3; d2: number; t: number } | null {
+    let best: { seg: number; point: THREE.Vector3; d2: number; t: number } | null = null;
     for (let s = 0; s < SEGS.length; s++) {
       if (!this.segAlive[s]) continue;
       const def = SEGS[s];
-      const a = this.joints[def.a], b = this.joints[def.b];
+      const a = this.joints[def.a];
+      const b = this.segCut[s] < 1 ? _cutB.lerpVectors(a, this.joints[def.b], this.segCut[s]) : this.joints[def.b];
       const S = this.def.scale * this.def.look.bulk;
       let rad = Math.max(def.ra, def.rb) * S + r;
       if (def.part === 'torso') rad *= 1.25;
@@ -683,7 +826,7 @@ export class Enemy {
       } else d2 = segSegDist2(p, q, a, b, _seg);
       if (d2 < rad * rad && (!best || d2 < best.d2)) {
         const pt = new THREE.Vector3().lerpVectors(a, b, _seg.t);
-        best = { seg: s, point: pt, d2 };
+        best = { seg: s, point: pt, d2, t: _seg.t * this.segCut[s] };
       }
     }
     return best;
@@ -699,8 +842,22 @@ export class Enemy {
     let dmg = h.damage * PART_DMG[def.part];
     if (this.mats.bloodU) this.mats.bloodU.value = Math.min(1, this.mats.bloodU.value + 0.12 + (h.crit ? 0.1 : 0));
     if (this.elite) dmg *= 0.85;
-    // flinch impulse
-    this.flinchV.addScaledVector(h.dir, 2.5 / this.def.staggerResist);
+    // flinch impulse: the struck part snaps away from the blow, heavy hits shove the body back
+    this.flinchV.addScaledVector(h.dir, (2.5 + h.stagger) / this.def.staggerResist);
+    if (h.source === 'melee' && !this.crawling) this.pos.addScaledVector(_a.copy(h.dir).setY(0), Math.min(0.35, (0.05 * h.stagger * h.damage) / (40 * this.def.staggerResist)));
+    // the wound opens where the blow landed, on the side it came from
+    const impact = this.impactPoint(h);
+    if (this.model) {
+      const frac = Math.min(1, (h.damage * Math.max(h.sever, 0.4)) / Math.max(20, this.segMaxHp[h.seg] || 60));
+      const size = h.source === 'bolt' ? 0.035 : h.blunt ? 0.075 : 0.05 + 0.05 * frac;
+      this.model.addWound(h.seg, impact, h.dir, size, 0.55 + 0.45 * frac);
+      if (h.source === 'bolt') {
+        // exit wound
+        const exit = _b.copy(impact).addScaledVector(h.dir, 0.12 * this.def.scale);
+        this.model.addWound(h.seg, exit, h.dir, size * 1.4, 0.8);
+        ctx.gore.splash(exit, h.dir, 0.7);
+      }
+    }
     let severed = false;
     // limb damage & severing
     if (def.part !== 'torso') {
@@ -709,19 +866,35 @@ export class Enemy {
       if (this.def.boss && def.part === 'head' && this.hp / this.maxHp > 0.25) this.segHp[h.seg] = Math.max(this.segHp[h.seg], 1);
       if (this.segHp[h.seg] <= 0) {
         if (!h.blunt) {
-          this.sever(h.seg, h.dir, h.source === 'bolt' ? 3 : 4.5);
+          this.sever(h.seg, h.dir, h.source === 'bolt' ? 3 : 4.5, h.t ?? 0);
           severed = true;
         } else if (def.part === 'head') {
           this.crushHead(h.dir);
           severed = true;
         }
       }
+    } else if (!h.blunt && h.source === 'melee' && h.damage > 32 && this.entrails < 2 && Math.random() < 0.55) {
+      // deep belly wounds spill entrails
+      this.entrails++;
+      ctx.gore.entrails(this.vis[0], _a.copy(impact), h.dir);
     }
-    ctx.gore.splash(h.point, _a.copy(h.dir).add(_b.set(0, 0.3, 0)).normalize(), severed ? 1.4 : h.crit ? 1 : 0.6);
+    // impairment where it was hit
+    if (def.part === 'thigh' || def.part === 'shin') {
+      const side = h.seg <= 7 ? 0 : 1;
+      this.legInj[side] = Math.max(this.legInj[side], 1 - Math.max(0, this.segHp[h.seg]) / this.segMaxHp[h.seg]);
+    }
+    if (def.part === 'head' && !severed) this.dazedT = 1.6;
+    ctx.gore.splash(impact, _a.copy(h.dir).add(_b.set(0, 0.3, 0)).normalize(), severed ? 1.6 : h.crit ? 1.1 : 0.7);
     const headshot = def.part === 'head';
-    if (severed && (def.part === 'head' || ((def.part === 'thigh' || def.part === 'shin') && !this.def.boss))) {
+    if (severed && def.part === 'head') {
       this.die(h.dir, { severed: true, head: headshot, crit: h.crit });
       return { killed: true, severed, headshot };
+    }
+    if (severed && (def.part === 'thigh' || def.part === 'shin') && !this.def.boss && !this.crawling) {
+      // legless: it falls and drags itself after you
+      this.crawling = true;
+      this.stagger(0.9);
+      this.flinchV.y -= 3;
     }
     const killed = this.damage(dmg, h.point, h.dir, h.source, h.crit, severed);
     if (!killed) {
@@ -729,6 +902,20 @@ export class Enemy {
       if (h.stagger * dmg > 28 * this.def.staggerResist) this.stagger(0.45 + h.stagger * 0.15);
     }
     return { killed, severed, headshot };
+  }
+
+  /** Surface point of a hit: off the limb axis towards where the blow came from. */
+  private impactPoint(h: HitInfo) {
+    const def = SEGS[h.seg];
+    const r = Math.max(def.ra, def.rb) * this.def.scale * this.def.look.bulk * (def.part === 'torso' ? 0.9 : 0.85);
+    const p = h.point.clone();
+    if (h.from) {
+      const to = _c.subVectors(h.from, p);
+      const axis = _b.subVectors(this.joints[def.b], this.joints[def.a]).normalize();
+      to.addScaledVector(axis, -to.dot(axis));
+      if (to.lengthSq() > 1e-6) p.addScaledVector(to.normalize(), r);
+    }
+    return p;
   }
 
   /** Returns true if this killed the creature. */
@@ -742,13 +929,20 @@ export class Enemy {
     return false;
   }
 
-  /** Cut the body at the root joint of segment `segIdx`. */
-  sever(segIdx: number, dir: THREE.Vector3, force: number) {
+  /**
+   * Cut the body. With a sculpted model the cut lands where the blade struck
+   * (fraction `t` along the segment); otherwise at the segment's root joint.
+   */
+  sever(segIdx: number, dir: THREE.Vector3, force: number, t = 0) {
     const ctx = this.ctx;
     const def = SEGS[segIdx];
-    const segs = [segIdx, ...def.children].filter((s) => this.segAlive[s]);
-    if (!segs.length) return;
+    const m = this.model;
+    const mid = !!m && def.part !== 'torso' && this.segCut[segIdx] === 1 && t > 0.2 && t < 0.9;
+    const kids = def.children.filter((s) => this.segAlive[s]);
+    const segs = mid ? kids : [segIdx, ...kids].filter((s) => this.segAlive[s]);
+    if (!mid && !segs.length) return;
     const cut = def.a;
+    const cutPos = mid ? new THREE.Vector3().lerpVectors(this.joints[def.a], this.joints[def.b], t) : this.joints[cut].clone();
     const piece = new Corpse();
     const map = new Map<number, number>();
     const pIdx = (j: number) => {
@@ -757,6 +951,16 @@ export class Enemy {
       map.set(j, i);
       return i;
     };
+    if (mid) {
+      // the far part of the struck limb rides the stub bone
+      const ic = piece.rag.add(cutPos, cutPos, 0.04 * this.def.scale);
+      const ib = pIdx(def.b);
+      piece.rag.link(ic, ib);
+      const stub = m!.bones[segIdx + SEGS.length];
+      orientBetween(stub, this.joints[def.a], this.joints[def.b], _c.copy(new THREE.Vector3(1, 0, 0).applyQuaternion(this.vis[segIdx].quaternion)));
+      piece.links.push({ vis: stub, ia: ic, ib, side: new THREE.Vector3(1, 0, 0).applyQuaternion(this.vis[segIdx].quaternion), back: t * this.segLen[segIdx] });
+      this.segCut[segIdx] = t;
+    }
     for (const s of segs) {
       const sd = SEGS[s];
       const ia = pIdx(sd.a), ib = pIdx(sd.b);
@@ -764,24 +968,35 @@ export class Enemy {
       const vis = this.vis[s];
       piece.links.push({ vis, ia, ib, side: new THREE.Vector3(1, 0, 0).applyQuaternion(vis.quaternion) });
       this.segAlive[s] = false;
-      if (sd.b !== cut) this.jointAlive[sd.b] = false;
+      if (sd.b !== cut || mid) this.jointAlive[sd.b] = false;
     }
+    if (mid && def.part === 'head') this.jointAlive[def.b] = false;
     // fling the piece
     const v = _a.copy(dir).multiplyScalar(force).add(_b.set((Math.random() - 0.5) * 1.5, 2 + Math.random() * 2, (Math.random() - 0.5) * 1.5));
     for (let i = 0; i < piece.rag.pos.length; i++) piece.rag.impulse(i, v.clone().multiplyScalar(0.7 + i * 0.3), 1 / 60);
+    if (m) {
+      piece.model = m;
+      m.refs++;
+    }
     ctx.onPieceCreated(piece);
 
-    // wound caps
-    const childVis = this.vis[segIdx];
-    const r = Math.max(def.ra, 0.04) * this.def.scale * this.def.look.bulk;
-    childVis.add(makeWoundCap(r, this.mats, true));
-    ctx.gore.spurt(childVis, new THREE.Vector3(0, 0, 0), new THREE.Vector3(0, -1, 0), 1.2, 0.5);
-    // stump on the parent
     const parentSeg = SEGS.findIndex((s, i) => s.b === cut && this.segAlive[i]);
+    let r = Math.max(def.ra, 0.04) * this.def.scale * this.def.look.bulk;
+    if (m) r = (mid ? m.cutMid(segIdx, t) : m.cutAtJoint(segIdx, parentSeg >= 0 ? parentSeg : 0)) * 1.05;
+    // wound caps on both sides of the cut
+    const pieceBone = mid ? m!.bones[segIdx + SEGS.length] : this.vis[segIdx];
+    const pieceLocal = new THREE.Vector3(0, mid ? t * this.segLen[segIdx] : 0, 0);
+    const pcap = makeWoundCap(r, this.mats, true);
+    pcap.position.copy(pieceLocal);
+    pieceBone.add(pcap);
+    ctx.gore.spurt(pieceBone, pieceLocal, new THREE.Vector3(0, -1, 0), 1.4, 0.6);
     let stumpParent: THREE.Object3D;
     const local = new THREE.Vector3();
     const ldir = new THREE.Vector3(0, 1, 0);
-    if (parentSeg >= 0) {
+    if (mid) {
+      stumpParent = this.vis[segIdx];
+      local.set(0, t * this.segLen[segIdx], 0);
+    } else if (parentSeg >= 0) {
       stumpParent = this.vis[parentSeg];
       local.set(0, this.segLen[parentSeg], 0);
     } else {
@@ -797,10 +1012,12 @@ export class Enemy {
     cap.position.copy(local);
     cap.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), ldir);
     stumpParent.add(cap);
-    ctx.gore.spurt(stumpParent, local, ldir, 3 + Math.random() * 2, def.part === 'head' ? 1.4 : 1);
-    ctx.gore.gibsAt(this.joints[cut], dir, 3 + Math.floor(Math.random() * 3));
-    ctx.fog.burst(this.joints[cut].x, this.joints[cut].z, 3, 2.5);
-    const s = ctx.pan(this.joints[cut]);
+    ctx.gore.spurt(stumpParent, local, ldir, 3.5 + Math.random() * 2.5, def.part === 'head' ? 1.5 : 1.1);
+    ctx.gore.gibsAt(cutPos, dir, 4 + Math.floor(Math.random() * 4));
+    ctx.gore.bones(cutPos, dir, 2 + Math.floor(Math.random() * 3));
+    ctx.gore.splash(cutPos, dir, 1.8);
+    ctx.fog.burst(cutPos.x, cutPos.z, 3, 2.5);
+    const s = ctx.pan(cutPos);
     audio.play('sever', { dist: s.dist, pan: s.pan });
     // losing your sword arm makes you desperate (and a bit slower)
     if (def.part === 'arm' || def.part === 'forearm') this.stagger(0.6);
@@ -811,7 +1028,12 @@ export class Enemy {
     const head = this.joints[J.Head];
     this.segAlive[1] = false;
     this.jointAlive[J.Head] = false;
-    this.scene.remove(this.vis[1]);
+    if (this.model) {
+      this.model.cutAtJoint(1, 0);
+      this.model.removeSegment(1);
+      for (const c of [...this.vis[1].children]) this.vis[1].remove(c);
+    } else this.scene.remove(this.vis[1]);
+    ctx.gore.bones(head, dir, 6);
     ctx.gore.splash(head, dir, 2.2);
     ctx.gore.gibsAt(head, dir, 9);
     const cap = makeWoundCap(SEGS[1].ra * this.def.scale * 1.4, this.mats, false);
@@ -855,6 +1077,7 @@ export class Enemy {
     for (const [a, b] of soft) if (map[a] >= 0 && map[b] >= 0) body.rag.link(map[a], map[b], 0.05);
     const imp = _a.copy(dir).multiplyScalar(how.crit ? 5 : 3.2).add(_b.set(0, 1.2, 0));
     for (const j of [J.Chest, J.Head, J.LSh, J.RSh]) if (map[j] >= 0) body.rag.impulse(map[j], imp, 1 / 60);
+    body.model = this.model; // the corpse now owns the live body's reference
     ctx.onPieceCreated(body);
     ctx.fog.burst(this.pos.x, this.pos.z, 4, 3);
     ctx.onEnemyKilled(this, how);
@@ -863,7 +1086,13 @@ export class Enemy {
   /** Remove visuals that are still owned by the live body (used on despawn). */
   dispose() {
     this.removed = true;
-    if (this.state !== 'dead') for (let s = 0; s < SEGS.length; s++) if (this.segAlive[s]) this.scene.remove(this.vis[s]);
+    if (this.state === 'dead') return;
+    for (let s = 0; s < SEGS.length; s++) if (this.segAlive[s]) this.scene.remove(this.vis[s]);
+    if (this.model && --this.model.refs <= 0) {
+      for (const b of this.model.bones) this.scene.remove(b);
+      this.scene.remove(this.model.mesh);
+      this.model.geometry.dispose();
+    }
   }
 
   eyePos(out: THREE.Vector3) {
