@@ -36,10 +36,12 @@ produces a static site in `dist/` that can be hosted anywhere.
 | Dodge (i-frames) | `Space` |
 | Strike (combo) / heavy | `LMB` tap / hold and release |
 | Block (parry if timed) / aim | `RMB` |
+| Kick (staggers, breaks guard, punts corpses) | `F` |
+| Execute a guard-broken foe | `E` |
 | Swap blade ↔ crossbow | `1` `2` or mouse wheel |
 | Reload | `R` |
 | Drink vial | `Q` |
-| Interact (chests, shrines, altars, loot) | `E` |
+| Interact (chests, shrines, altars, beacons, loot) | `E` |
 | Pause | `Esc` |
 
 ## What's in the game
@@ -57,8 +59,9 @@ shrines, blood altars and dormant creature lairs.
   volume drifting on the wind and terrain-relative height falloff. Moonlight is shadowed through the shadow
   map, which produces god rays between trees. Your lantern, shrines, explosions and creature eyes light the
   fog locally.
-- A depth-aware upsample, physically based bloom, ACES tone mapping, colour grading, film grain, chromatic
-  aberration and blood on the lens complete the frame.
+- Temporal accumulation reprojects last frame's fog to remove ray-march noise. A depth-aware upsample,
+  physically based bloom, ACES tone mapping, colour grading, film grain, chromatic
+  aberration, blood on the lens and FXAA complete the frame. Dynamic resolution holds about 60 fps.
 
 **Combat.**
 - *Melee.* Light attacks chain into a three-swing combo; hold to wind up a charged overhead. The blade is
@@ -73,11 +76,29 @@ shrines, blood altars and dormant creature lairs.
   severed legs are lethal. Blunt weapons crush skulls instead of cutting. On death the whole body becomes a
   ragdoll that you can keep hacking at.
 - *Feel.* Hit-stop, trauma-based camera shake, view-model sway and recoil, blood that builds up on your blade,
-  and fully synthesized positional audio (`src/engine/Audio.ts`).
+  and fully synthesized positional audio (`src/engine/Audio.ts`): war drums swell with the fight, and a
+  formant choir sings while the Warden lives.
 
-**Creatures.** Hollows (shamblers that reach for you), Mist Stalkers (fast, lunging pack hunters) and Barrow
-Brutes (armoured, slow, ground-slamming). Elites appear as difficulty rises. A director spawns them just
-beyond visibility, mostly behind you, so their eyes are often the first thing you see.
+- *Posture and executions.* Every hit, parry and kick erodes a foe's posture. When it breaks they drop to
+  their knees and you can **execute** them: a slow-motion finishing thrust that takes the head, heals you and
+  pays out extra Echoes. On the Warden it lands a huge blow instead.
+
+**Creatures.**
+- Hollows: shamblers that reach for you.
+- Mist Stalkers: fast, lunging pack hunters.
+- Weepers: they keep their distance and lob arcing bile from a swollen throat sac, and back off when you close in.
+- Barrow Brutes: armoured, slow, ground-slamming.
+- The Drowned Warden: a crowned boss with slams, wide sweeps and a charge. It calls the fog's children at
+  two-thirds and one-third health.
+
+Elites appear as difficulty rises. A director spawns creatures just beyond visibility, mostly behind you, so
+their eyes are often the first thing you see. Each creature carries its own blood: its skin darkens and glistens
+where you've cut it.
+
+**Run structure.** Beacon towers stand across the moor; the compass marks the nearest one. Kindling a beacon
+calls a **fog surge**: the mist thickens and the fog's children converge on you. Kindle three and the Warden
+rises. Felling it raises the **tier**: the fog grows denser and hungrier, and better loot drops. Surges also
+roll in on their own every few minutes.
 
 **Loot and progression.**
 - Weapons: longsword, greataxe, flanged mace, falchion, crossbow and arbalest, across five rarities
@@ -137,6 +158,11 @@ The URL parameters below make the game scriptable, for example from Playwright:
 `window.game` exposes the running instance. `game.input.inject('Mouse0', true)` simulates input.
 
 `npm run typecheck` type-checks the project.
+
+`npm run build && npm run smoke` runs an end-to-end smoke test (`scripts/smoke.mjs`). It serves the build,
+drives the game headlessly with Playwright, and asserts that melee kills, limb severing, executions, crossbow
+headshots, boss spawning and beacon generation all work, then soaks 3,000 frames of random input. It needs
+`playwright` and `npx playwright install chromium`.
 
 ## Roadmap to AAA
 

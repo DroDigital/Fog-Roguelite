@@ -650,6 +650,7 @@ export class Game implements Ctx {
       ['Echoes remembered', `<b style="color:var(--gold)">+${total}</b>`],
     ]);
     this.state = 'dead';
+    audio.setBoss(false);
   }
 
   // ─────────────────────────────────────────────────────── progression
@@ -976,6 +977,7 @@ export class Game implements Ctx {
     const realDt = Math.min(0.05, (now - this.last) / 1000);
     this.last = now;
     this.frame(realDt);
+    if (this.state === 'playing' && this.save.settings.dynamicRes !== false) this.pipeline.adapt(realDt);
   };
 
   /** Advance one frame (exposed so automated tests can step deterministically). */
@@ -1150,7 +1152,8 @@ export class Game implements Ctx {
 
     // audio
     const near = this.enemies.reduce((m, e) => (e.alive && e.state !== 'lurk' ? Math.min(m, e.pos.distanceTo(pl.pos)) : m), 99);
-    audio.update(realDt, this.time, clamp(1 - near / 25, 0, 1), pl.hp / pl.stats.maxHp);
+    audio.update(realDt, this.time, Math.max(clamp(1 - near / 18, 0, 1), this.surgeT > 0 ? 0.6 : 0), pl.hp / pl.stats.maxHp);
+    audio.setBoss(!!(this.boss && this.boss.alive));
 
     // HUD
     const w = pl.active === 'melee' ? pl.melee : pl.ranged;
@@ -1265,7 +1268,7 @@ export class Game implements Ctx {
     if (this.state !== 'menu') {
       const lp = new THREE.Vector3();
       lantern.getWorldPosition(lp);
-      fogLights.push({ pos: lp, color: lantern.color, intensity: lantern.intensity * 0.14, radius: 16 * this.player.stats.lanternRadius });
+      fogLights.push({ pos: lp, color: lantern.color, intensity: lantern.intensity * 0.05, radius: 16 * this.player.stats.lanternRadius });
     }
     for (const L of this.lights) {
       if (fogLights.length >= 6) break;

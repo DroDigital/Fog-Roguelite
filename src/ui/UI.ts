@@ -82,6 +82,7 @@ export class UI {
           <div class="setting">Field of View <input type="range" id="o-fov" min="60" max="100" step="1"></div>
           <div class="setting">Volume <input type="range" id="o-vol" min="0" max="1" step="0.01"></div>
           <div class="setting">Gore <input type="range" id="o-gore" min="0" max="1.5" step="0.05"></div>
+          <div class="setting">Dynamic Resolution <input type="checkbox" id="o-dyn"></div>
           <div class="btns" style="margin-top:20px"><button class="mb" data-a="back">Back</button></div>
         </div>
       </div>
@@ -190,6 +191,12 @@ export class UI {
     vol.value = String(s.volume);
     const gore = $<HTMLInputElement>('#o-gore');
     gore.value = String(s.gore);
+    const dyn = $<HTMLInputElement>('#o-dyn');
+    dyn.checked = s.dynamicRes !== false;
+    dyn.onchange = () => {
+      s.dynamicRes = dyn.checked;
+      this.onSettings(s);
+    };
     const upd = () => {
       s.quality = q.value;
       s.sensitivity = +sens.value;

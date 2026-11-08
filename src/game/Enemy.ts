@@ -3,7 +3,7 @@
 
 import * as THREE from 'three';
 import { J, SEGS, REST, BRACES, Ragdoll, orientBetween, segSegDist2, solveIK } from './Body';
-import { buildSegment, makeCreatureMats, makeWoundCap, type CreatureLook, type CreatureMats } from './CreatureMesh';
+import { buildSegment, makeCreatureMats, makeFlesh, makeWoundCap, type CreatureLook, type CreatureMats } from './CreatureMesh';
 import type { Ctx } from './Ctx';
 import { audio } from '../engine/Audio';
 import { angleDiff, clamp, damp, lerp } from '../engine/Random';
@@ -199,7 +199,11 @@ export class Enemy {
       mats = makeCreatureMats(ctx.tex, look);
       matCache.set(d.kind + (this.elite ? 'e' : ''), mats);
     }
-    this.mats = mats;
+    // per-creature skin so blood accumulates on this body only
+    const bloodU = { value: 0 };
+    const look = { ...d.look };
+    this.mats = { ...mats, flesh: makeFlesh(ctx.tex, look, bloodU), bloodU };
+    mats = this.mats;
     this.pos.copy(at);
     this.pos.y = ctx.world.height(at.x, at.z);
     this.yaw = Math.random() * Math.PI * 2;
@@ -693,6 +697,7 @@ export class Enemy {
     this.lastHitTime = ctx.time;
     this.alert();
     let dmg = h.damage * PART_DMG[def.part];
+    if (this.mats.bloodU) this.mats.bloodU.value = Math.min(1, this.mats.bloodU.value + 0.12 + (h.crit ? 0.1 : 0));
     if (this.elite) dmg *= 0.85;
     // flinch impulse
     this.flinchV.addScaledVector(h.dir, 2.5 / this.def.staggerResist);

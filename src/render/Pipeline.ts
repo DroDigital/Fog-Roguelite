@@ -2,7 +2,7 @@
 // → physically based bloom → tonemapping, grading and lens effects.
 
 import * as THREE from 'three';
-import { FULLSCREEN_VERT, FOG_FRAG, COMPOSITE_FRAG, DOWNSAMPLE_FRAG, UPSAMPLE_FRAG, FINAL_FRAG, MAX_FOG_LIGHTS } from './shaders';
+import { FULLSCREEN_VERT, FOG_FRAG, COMPOSITE_FRAG, DOWNSAMPLE_FRAG, UPSAMPLE_FRAG, FINAL_FRAG, FXAA_FRAG, MAX_FOG_LIGHTS } from './shaders';
 import type { FogSim } from '../world/FogSim';
 
 export interface Quality {
@@ -25,6 +25,11 @@ export interface FogLight { pos: THREE.Vector3; color: THREE.Color; intensity: n
 export class Pipeline {
   private sceneRT!: THREE.WebGLRenderTarget;
   private fogRT!: THREE.WebGLRenderTarget;
+  private fogHist!: THREE.WebGLRenderTarget;
+  private ldrRT!: THREE.WebGLRenderTarget;
+  private fxaaMat: THREE.ShaderMaterial;
+  private prevViewProj = new THREE.Matrix4();
+  private historyValid = false;
   private compRT!: THREE.WebGLRenderTarget;
   private bloomRTs: THREE.WebGLRenderTarget[] = [];
   private quad: THREE.Mesh;
@@ -39,6 +44,25 @@ export class Pipeline {
   private w = 1;
   private h = 1;
   quality: Quality = QUALITY_PRESETS.high;
+  /** Dynamic resolution multiplier, driven by measured frame time. */
+  dynScale = 1;
+  private ftAvg = 16;
+  private ftT = 0;
+
+  /** Feed real frame times; nudges internal resolution to hold ~60 fps. */
+  adapt(realDt: number) {
+    this.ftAvg += (realDt * 1000 - this.ftAvg) * 0.05;
+    this.ftT += realDt;
+    if (this.ftT < 2.5) return;
+    this.ftT = 0;
+    let next = this.dynScale;
+    if (this.ftAvg > 21 && this.dynScale > 0.55) next = Math.max(0.55, this.dynScale - 0.1);
+    else if (this.ftAvg < 13 && this.dynScale < 1) next = Math.min(1, this.dynScale + 0.05);
+    if (next !== this.dynScale) {
+      this.dynScale = next;
+      this.resize(window.innerWidth, window.innerHeight);
+    }
+  }
   fogLights: FogLight[] = [];
 
   constructor(private renderer: THREE.WebGLRenderer, noise3D: THREE.Data3DTexture, sim: FogSim) {
@@ -80,7 +104,11 @@ export class Pipeline {
       uSteps: { value: 48 },
       uFrame: { value: 0 },
       uRes: { value: new THREE.Vector2() },
+      tHistory: { value: null },
+      uPrevViewProj: { value: new THREE.Matrix4() },
+      uHistoryValid: { value: 0 },
     });
+    this.fxaaMat = mk(FXAA_FRAG, { tSrc: { value: null }, uTexel: { value: new THREE.Vector2() } });
     this.compMat = mk(COMPOSITE_FRAG, {
       tScene: { value: null },
       tFog: { value: null },
@@ -121,12 +149,14 @@ export class Pipeline {
     this.renderer.setSize(cw, ch, false);
     this.renderer.domElement.style.width = cw + 'px';
     this.renderer.domElement.style.height = ch + 'px';
-    const s = this.quality.renderScale * Math.min(dpr, 1.5);
+    const s = this.quality.renderScale * this.dynScale * Math.min(dpr, 1.5);
     const w = Math.max(2, Math.floor(cw * s)), h = Math.max(2, Math.floor(ch * s));
     this.w = w;
     this.h = h;
     this.sceneRT?.dispose();
     this.fogRT?.dispose();
+    this.fogHist?.dispose();
+    this.ldrRT?.dispose();
     this.compRT?.dispose();
     for (const b of this.bloomRTs) b.dispose();
     const depthTexture = new THREE.DepthTexture(w, h);
@@ -139,7 +169,12 @@ export class Pipeline {
       magFilter: THREE.LinearFilter,
     });
     const fw = Math.max(2, Math.floor(w * this.quality.fogScale)), fh = Math.max(2, Math.floor(h * this.quality.fogScale));
-    this.fogRT = new THREE.WebGLRenderTarget(fw, fh, { type: THREE.HalfFloatType, depthBuffer: false, minFilter: THREE.LinearFilter, magFilter: THREE.LinearFilter });
+    const fogOpts = { type: THREE.HalfFloatType, depthBuffer: false, minFilter: THREE.LinearFilter, magFilter: THREE.LinearFilter } as const;
+    this.fogRT = new THREE.WebGLRenderTarget(fw, fh, fogOpts);
+    this.fogHist = new THREE.WebGLRenderTarget(fw, fh, fogOpts);
+    this.historyValid = false;
+    this.ldrRT = new THREE.WebGLRenderTarget(cw, ch, { type: THREE.UnsignedByteType, depthBuffer: false, minFilter: THREE.LinearFilter, magFilter: THREE.LinearFilter });
+    this.fxaaMat.uniforms.uTexel.value.set(1 / cw, 1 / ch);
     this.compRT = new THREE.WebGLRenderTarget(w, h, { type: THREE.HalfFloatType, depthBuffer: false, minFilter: THREE.LinearFilter, magFilter: THREE.LinearFilter });
     this.bloomRTs = [];
     let bw = w, bh = h;
@@ -193,12 +228,21 @@ export class Pipeline {
       fu.uLightCol.value[i].set(L.color.r * L.intensity, L.color.g * L.intensity, L.color.b * L.intensity);
     }
     fu.uLightCount.value = n;
+    fu.tHistory.value = this.fogHist.texture;
+    fu.uPrevViewProj.value.copy(this.prevViewProj);
+    fu.uHistoryValid.value = this.historyValid ? 1 : 0;
     this.pass(this.fogMat, this.fogRT);
+    // ping-pong: this frame's fog becomes next frame's history
+    const tmp = this.fogRT;
+    this.fogRT = this.fogHist;
+    this.fogHist = tmp;
+    this.historyValid = true;
+    this.prevViewProj.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
 
     // --- Composite
     const cu = this.compMat.uniforms;
     cu.tScene.value = this.sceneRT.texture;
-    cu.tFog.value = this.fogRT.texture;
+    cu.tFog.value = this.fogHist.texture;
     cu.tDepth.value = this.sceneRT.depthTexture;
     cu.uNear.value = camera.near;
     cu.uFar.value = camera.far;
@@ -228,6 +272,8 @@ export class Pipeline {
     fin.tHdr.value = this.compRT.texture;
     fin.tBloom.value = this.bloomRTs[0].texture;
     fin.uTime.value = time;
-    this.pass(this.finalMat, null);
+    this.pass(this.finalMat, this.ldrRT);
+    this.fxaaMat.uniforms.tSrc.value = this.ldrRT.texture;
+    this.pass(this.fxaaMat, null);
   }
 }

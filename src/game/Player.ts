@@ -135,7 +135,7 @@ export class Player {
     this.lanternHolder.scale.setScalar(0.8);
     this.lanternHolder.add(this.lantern.group);
     this.vm.add(this.lanternHolder);
-    this.light = new THREE.PointLight(new THREE.Color(1.0, 0.6, 0.3), 9, 20, 1.6);
+    this.light = new THREE.PointLight(new THREE.Color(1.0, 0.6, 0.3), 6.5, 20, 1.35);
     this.light.position.set(0, 0.0, 0);
     this.lantern.group.add(this.light);
     this.light.shadow.mapSize.set(512, 512);
@@ -480,7 +480,7 @@ export class Player {
     this.lantern.group.rotation.z = Math.sin(this.bobPhase) * 0.12 * bobAmt + this.swayX * 4;
     this.lantern.group.rotation.x = Math.cos(this.bobPhase * 2) * 0.06 * bobAmt;
     const flick = 0.85 + 0.1 * Math.sin(t * 17.3) + 0.06 * Math.sin(t * 31.7 + 2) + 0.04 * Math.sin(t * 7.1);
-    this.light.intensity = 9 * flick * (this.alive ? 1 : 0.3);
+    this.light.intensity = 6.5 * flick * (this.alive ? 1 : 0.3);
     this.lantern.flame.scale.set(1, 1.8 * flick, 1);
   }
 

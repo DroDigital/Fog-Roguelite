@@ -15,7 +15,7 @@ export interface WeaponMats {
 
 export function makeWeaponMats(tex: TextureGen): WeaponMats {
   const bloodU = { value: 0 };
-  const steel = tex.material('steel', 512, { envMapIntensity: 1.0 });
+  const steel = tex.material("steel", 512, { envMapIntensity: 2.6 });
   // blood smears build up on the blade the more you kill
   steel.onBeforeCompile = (sh) => {
     sh.uniforms.uBlood = bloodU;
@@ -42,32 +42,49 @@ export function makeWeaponMats(tex: TextureGen): WeaponMats {
   return { steel, darkSteel, wood, leather, bloodU };
 }
 
+/** Lofted blade with a diamond cross-section and crisp edges; length along -Z. */
 function bladeGeo(len: number, w0: number, w1: number, thick: number, curve = 0, chop = 0): THREE.BufferGeometry {
-  const s = new THREE.Shape();
-  const steps = 10;
-  s.moveTo(-w0 / 2, 0);
-  for (let i = 1; i <= steps; i++) {
-    const t = i / steps;
-    const w = w0 + (w1 - w0) * t + chop * Math.sin(t * Math.PI) * 0.6;
+  const N = 28;
+  const pos: number[] = [];
+  const uv: number[] = [];
+  const idx: number[] = [];
+  const station = (t: number) => {
+    let w = w0 + (w1 - w0) * t + chop * Math.sin(t * Math.PI);
+    if (t > 0.86) w *= Math.max(0, 1 - (t - 0.86) / 0.14) ** 0.8;
+    const th = thick * (1 - t * 0.5) * (t > 0.86 ? Math.max(0.15, 1 - (t - 0.86) / 0.14) : 1);
     const c = curve * t * t;
-    s.lineTo(-w / 2 + c, t * len * 0.88);
+    return { w: Math.max(w, 1e-4), th, c, z: -t * len };
+  };
+  // 4 faces: (+x edge → +y spine), (+y → -x), (-x → -y), (-y → +x)
+  const corners = (st: { w: number; th: number; c: number; z: number }) => [
+    [st.w / 2 + st.c, 0], [st.c * 0.5, st.th / 2], [-st.w / 2 + st.c * 0.2, 0], [st.c * 0.5, -st.th / 2],
+  ];
+  for (let f = 0; f < 4; f++) {
+    const base = pos.length / 3;
+    for (let i = 0; i <= N; i++) {
+      const t = i / N;
+      const st = station(t);
+      const cs = corners(st);
+      const a = cs[f], b = cs[(f + 1) % 4];
+      pos.push(a[0], a[1], st.z, b[0], b[1], st.z);
+      uv.push(0.5 + (f % 2) * 0.25, t, 0.75 - (f % 2) * 0.25, t);
+    }
+    for (let i = 0; i < N; i++) {
+      const k = base + i * 2;
+      idx.push(k, k + 2, k + 1, k + 1, k + 2, k + 3);
+    }
   }
-  s.lineTo(curve, len); // tip
-  for (let i = steps; i >= 1; i--) {
-    const t = i / steps;
-    const w = w0 + (w1 - w0) * t + chop * Math.sin(t * Math.PI) * 1.4;
-    const c = curve * t * t;
-    s.lineTo(w / 2 + c, t * len * 0.88);
-  }
-  s.lineTo(w0 / 2, 0);
-  const g = new THREE.ExtrudeGeometry(s, { depth: thick * 0.3, bevelEnabled: true, bevelThickness: thick * 0.5, bevelSize: Math.min(w0, w1) * 0.42, bevelSegments: 2, curveSegments: 4 });
-  g.translate(0, 0, -thick * 0.15);
-  // uv: map along length for the blood smear shader
-  const uv = g.attributes.uv as THREE.BufferAttribute;
-  const pos = g.attributes.position as THREE.BufferAttribute;
-  for (let i = 0; i < uv.count; i++) uv.setXY(i, pos.getX(i) * 3 + 0.5, pos.getY(i) / len);
-  g.rotateX(-Math.PI / 2); // length now along -Z
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  g.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2));
+  g.setIndex(idx);
   g.computeVertexNormals();
+  // ensure outward winding
+  const n = g.attributes.normal as THREE.BufferAttribute;
+  if (n.getX(0) < 0) {
+    g.setIndex(idx.map((_, i) => idx[i - (i % 3) + (2 - (i % 3))]));
+    g.computeVertexNormals();
+  }
   return g;
 }
 
