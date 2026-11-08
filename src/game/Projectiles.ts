@@ -24,7 +24,7 @@ export interface BoltHost {
   enemies: Enemy[];
   corpses: Corpse[];
   scene: THREE.Scene;
-  onBoltHit(e: Enemy, seg: number, point: THREE.Vector3, dir: THREE.Vector3, damage: number, crit: boolean): void;
+  onBoltHit(e: Enemy, seg: number, point: THREE.Vector3, dir: THREE.Vector3, damage: number, crit: boolean, t: number, from: THREE.Vector3): void;
   onBoltImpact(point: THREE.Vector3, dir: THREE.Vector3, explosive: boolean, surface: 'ground' | 'prop' | 'flesh'): void;
   pan(p: THREE.Vector3): { dist: number; pan: number };
 }
@@ -75,6 +75,7 @@ export class Projectiles {
       let bestE: Enemy | null = null;
       let bestSeg = -1;
       let bestPt: THREE.Vector3 | null = null;
+      let bestSegT = 0.5;
       for (const e of h.enemies) {
         if (!e.alive || b.hit.has(e.id)) continue;
         if (e.pos.distanceToSquared(p0) > 100 + b.vel.lengthSq() * dt * dt) continue;
@@ -86,6 +87,7 @@ export class Projectiles {
             bestE = e;
             bestSeg = r.seg;
             bestPt = r.point;
+            bestSegT = r.t;
           }
         }
       }
@@ -107,7 +109,7 @@ export class Projectiles {
         const vis = bestE.vis[bestSeg];
         const pt = bestPt!;
         b.hit.add(bestE.id);
-        h.onBoltHit(bestE, bestSeg, pt, dir.clone(), b.damage, b.crit);
+        h.onBoltHit(bestE, bestSeg, pt, dir.clone(), b.damage, b.crit, bestSegT, p0.clone().addScaledVector(dir, -1));
         h.onBoltImpact(pt, dir.clone(), b.explosive, 'flesh');
         b.alive = false;
         b.mesh.position.copy(pt).addScaledVector(dir, 0.06);

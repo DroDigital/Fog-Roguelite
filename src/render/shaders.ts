@@ -38,6 +38,9 @@ uniform int uLightCount;
 uniform int uSteps;
 uniform float uFrame;
 uniform vec2 uRes;
+uniform sampler2D tHistory;
+uniform mat4 uPrevViewProj;
+uniform float uHistoryValid;
 
 float ign(vec2 p) { // interleaved gradient noise
   return fract(52.9829189 * fract(dot(p, vec2(0.06711056, 0.00583715))));
@@ -111,7 +114,7 @@ void main() {
         float fall = clamp(1.0 - d2 / (r * r), 0.0, 1.0);
         fall *= fall;
         float c = dot(rd, dl * inversesqrt(d2 + 1e-4));
-        Lr += uLightCol[k] * (hg(c, 0.35) * 0.7 + 0.03) * fall / (1.0 + d2 * 0.9);
+        Lr += uLightCol[k] * (hg(c, 0.35) * 0.7 + 0.03) * fall / (1.0 + d2 * 12.0 / (r * r));
       }
       float ext = exp(-sigma * dt);
       scat += T * Lr * (1.0 - ext);
@@ -119,7 +122,22 @@ void main() {
       if (T < 0.004) break;
     }
   }
-  gl_FragColor = vec4(scat, T);
+  vec4 cur = vec4(scat, T);
+  // temporal accumulation: reproject the ray's end point into last frame
+  if (uHistoryValid > 0.5) {
+    vec3 pr = uCamPos + rd * min(L, 60.0);
+    vec4 pc = uPrevViewProj * vec4(pr, 1.0);
+    vec2 puv = pc.xy / pc.w * 0.5 + 0.5;
+    if (pc.w > 0.0 && puv.x > 0.0 && puv.x < 1.0 && puv.y > 0.0 && puv.y < 1.0) {
+      vec4 hist = texture2D(tHistory, puv);
+      // clamp history towards the current estimate to avoid ghosting on moving bodies
+      hist.rgb = clamp(hist.rgb, cur.rgb * 0.55 - 0.002, cur.rgb * 1.7 + 0.002);
+      hist.a = clamp(hist.a, cur.a - 0.12, cur.a + 0.12);
+      float w = 0.86 * (1.0 - clamp(abs(hist.a - cur.a) * 2.5, 0.0, 0.6));
+      cur = mix(cur, hist, w);
+    }
+  }
+  gl_FragColor = cur;
 }
 `;
 
@@ -281,5 +299,32 @@ void main() {
   col += g * uGrain * (1.0 - lum * 0.6);
   col *= uFade;
   gl_FragColor = vec4(max(col, 0.0), 1.0);
+}
+`;
+
+// FXAA 3.11 (console/"quality lite" variant) on the tonemapped image.
+export const FXAA_FRAG = /* glsl */ `
+precision highp float;
+varying vec2 vUv;
+uniform sampler2D tSrc;
+uniform vec2 uTexel;
+float luma(vec3 c) { return dot(c, vec3(0.299, 0.587, 0.114)); }
+void main() {
+  vec3 rgbNW = texture2D(tSrc, vUv + vec2(-1.0, -1.0) * uTexel).rgb;
+  vec3 rgbNE = texture2D(tSrc, vUv + vec2(1.0, -1.0) * uTexel).rgb;
+  vec3 rgbSW = texture2D(tSrc, vUv + vec2(-1.0, 1.0) * uTexel).rgb;
+  vec3 rgbSE = texture2D(tSrc, vUv + vec2(1.0, 1.0) * uTexel).rgb;
+  vec3 rgbM = texture2D(tSrc, vUv).rgb;
+  float lNW = luma(rgbNW), lNE = luma(rgbNE), lSW = luma(rgbSW), lSE = luma(rgbSE), lM = luma(rgbM);
+  float lMin = min(lM, min(min(lNW, lNE), min(lSW, lSE)));
+  float lMax = max(lM, max(max(lNW, lNE), max(lSW, lSE)));
+  vec2 dir = vec2(-((lNW + lNE) - (lSW + lSE)), ((lNW + lSW) - (lNE + lSE)));
+  float reduce = max((lNW + lNE + lSW + lSE) * 0.25 * 0.125, 1.0 / 128.0);
+  float rcp = 1.0 / (min(abs(dir.x), abs(dir.y)) + reduce);
+  dir = clamp(dir * rcp, vec2(-8.0), vec2(8.0)) * uTexel;
+  vec3 a = 0.5 * (texture2D(tSrc, vUv + dir * (1.0 / 3.0 - 0.5)).rgb + texture2D(tSrc, vUv + dir * (2.0 / 3.0 - 0.5)).rgb);
+  vec3 b = a * 0.5 + 0.25 * (texture2D(tSrc, vUv + dir * -0.5).rgb + texture2D(tSrc, vUv + dir * 0.5).rgb);
+  float lB = luma(b);
+  gl_FragColor = vec4((lB < lMin || lB > lMax) ? a : b, 1.0);
 }
 `;

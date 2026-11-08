@@ -17,6 +17,10 @@ export class AudioSys {
   private noiseBuf!: AudioBuffer;
   private samples = new Map<string, AudioBuffer>();
   private heartbeatT = 0;
+  private beatT = 0;
+  private beat = 0;
+  private combat = 0;
+  private choir: { gain: GainNode } | null = null;
   private windGain: GainNode | null = null;
   private windFilter: BiquadFilterNode | null = null;
   volume = 0.8;
@@ -122,9 +126,66 @@ export class AudioSys {
     }
   }
 
+  /** Boss choir: a detuned, formant-filtered pad that swells while a boss lives. */
+  setBoss(on: boolean) {
+    const ctx = this.ctx;
+    if (!ctx) return;
+    if (on && !this.choir) {
+      const gain = ctx.createGain();
+      gain.gain.value = 0;
+      gain.connect(this.amb);
+      gain.connect(this.reverbSend);
+      for (const [f, det] of [[110, -7], [110, 6], [164.8, -4], [196, 5], [130.8, 0]] as [number, number][]) {
+        const o = ctx.createOscillator();
+        o.type = 'sawtooth';
+        o.frequency.value = f;
+        o.detune.value = det;
+        const vib = ctx.createOscillator();
+        vib.frequency.value = 4.5 + Math.random();
+        const vg = ctx.createGain();
+        vg.gain.value = 4;
+        vib.connect(vg).connect(o.detune);
+        vib.start();
+        // "ah" vowel formants
+        for (const [ff, q, gg] of [[700, 8, 0.5], [1150, 10, 0.3], [2800, 12, 0.12]] as [number, number, number][]) {
+          const bp = ctx.createBiquadFilter();
+          bp.type = 'bandpass';
+          bp.frequency.value = ff;
+          bp.Q.value = q;
+          const g = ctx.createGain();
+          g.gain.value = gg * 0.05;
+          o.connect(bp).connect(g).connect(gain);
+        }
+        o.start();
+      }
+      gain.gain.setTargetAtTime(0.9, ctx.currentTime, 3);
+      this.choir = { gain };
+    } else if (!on && this.choir) {
+      const c = this.choir;
+      c.gain.gain.setTargetAtTime(0, ctx.currentTime, 2);
+      setTimeout(() => c.gain.disconnect(), 9000);
+      this.choir = null;
+    }
+  }
+
   /** Called every frame. `danger` 0..1 drives tension layers. */
   update(dt: number, time: number, danger: number, healthFrac: number) {
     if (!this.ctx || !this.windFilter || !this.windGain) return;
+    // war drums swell in and out with the fight
+    this.combat += ((danger > 0.45 ? 1 : 0) - this.combat) * Math.min(1, dt * (danger > 0.45 ? 1.5 : 0.25));
+    if (this.combat > 0.05) {
+      this.beatT -= dt;
+      if (this.beatT <= 0) {
+        this.beatT = 0.42;
+        const v = this.combat;
+        const t = this.ctx.currentTime;
+        const b = this.beat++ % 8;
+        if (b === 0 || b === 3 || b === 4) this.tone(t, 0.32, 'sine', 70, 38, 0.5 * v);
+        if (b === 2 || b === 6) this.tone(t, 0.22, 'triangle', 120, 80, 0.16 * v);
+        if (b === 6) this.noise(t, 0.12, 'bandpass', 900, 1.5, 0.06 * v);
+        if (b === 0 && this.beat % 32 === 1) this.noise(t, 2.5, 'lowpass', 300, 1, 0.18 * v, 0, 60);
+      }
+    }
     const t = this.ctx.currentTime;
     this.windFilter.frequency.setTargetAtTime(430 + 170 * Math.sin(time * 0.13) + 110 * Math.sin(time * 0.31), t, 0.5);
     this.windGain.gain.setTargetAtTime(0.13 + 0.07 * Math.sin(time * 0.21) + danger * 0.05, t, 0.6);

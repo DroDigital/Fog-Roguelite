@@ -11,7 +11,11 @@ export interface HudState {
   hp: number; maxHp: number; st: number; maxSt: number; xp: number; xpNext: number; level: number;
   vials: number; bolts: number; maxBolts: number; weapon: Weapon; active: 'melee' | 'ranged';
   echoes: number; distance: number; kills: number; yaw: number; time: number;
+  beacon: { rel: number; dist: number } | null; beaconsLit: number; beaconsNeeded: number; tier: number;
+  surge: boolean;
 }
+
+export interface EnemyBar { x: number; y: number; hp: number; posture: number; broken: boolean; elite: boolean }
 
 export class UI {
   root: HTMLElement;
@@ -27,9 +31,14 @@ export class UI {
     this.root = root;
     root.innerHTML = `
       <div id="hud" class="off">
-        <div class="compass"><div class="strip"></div></div>
+        <div class="compass"><div class="strip"></div><div class="marker" id="h-marker">◆</div></div>
+        <div id="h-objective"></div>
+        <div id="bossbar" class="hidden"><div class="bname"></div><div class="btrack"><i class="bfill"></i><i class="bpost"></i></div></div>
+        <div id="hurtdir"></div>
+        <div id="ebars"></div>
+        <div id="hint"></div>
         <div id="feed"></div>
-        <div class="topinfo"><div>DEPTH <b id="h-dist">0</b> M</div><div>SLAIN <b id="h-kills">0</b></div><div>ECHOES <b id="h-echo">0</b></div></div>
+        <div class="topinfo"><div>TIER <b id="h-tier">I</b></div><div>DEPTH <b id="h-dist">0</b> M</div><div>SLAIN <b id="h-kills">0</b></div><div>ECHOES <b id="h-echo">0</b></div></div>
         <div id="crosshair"></div>
         <div id="prompt"></div>
         <div id="notify"></div>
@@ -55,7 +64,7 @@ export class UI {
           <button class="mb" data-a="settings">Settings</button>
         </div>
         <div class="meta-line" id="m-meta"></div>
-        <div class="hint">WASD move · Shift sprint · Space dodge · LMB strike (hold for heavy) · RMB block / aim · 1 / 2 or wheel swap · R reload · Q vial · E interact · Esc pause</div>
+        <div class="hint">WASD move · Shift sprint · Space dodge · LMB strike (hold for heavy) · RMB block / aim · F kick · 1 / 2 or wheel swap · R reload · Q vial · E interact / execute · Esc pause<br>Gamepad: sticks move / look · RT strike · LT block · A dodge · B kick · X interact · Y swap · LB vial · RB reload · L3 sprint · Start pause / begin</div>
       </div>
       <div class="screen menu" id="s-pause">
         <h2 class="title" style="font-size:42px">PAUSED</h2>
@@ -73,6 +82,7 @@ export class UI {
           <div class="setting">Field of View <input type="range" id="o-fov" min="60" max="100" step="1"></div>
           <div class="setting">Volume <input type="range" id="o-vol" min="0" max="1" step="0.01"></div>
           <div class="setting">Gore <input type="range" id="o-gore" min="0" max="1.5" step="0.05"></div>
+          <div class="setting">Dynamic Resolution <input type="checkbox" id="o-dyn"></div>
           <div class="btns" style="margin-top:20px"><button class="mb" data-a="back">Back</button></div>
         </div>
       </div>
@@ -162,6 +172,7 @@ export class UI {
     for (const [k, el] of Object.entries(this.screens)) el.classList.toggle('on', k === name);
     this.current = name ?? 'game';
     $('#hud').classList.toggle('off', name !== null);
+    $('#hud').style.transition = name !== null ? 'none' : '';
     if (name === 'main' && this.save) {
       const s = this.save;
       $('#m-meta').innerHTML = s.runs > 0 ? `ECHOES ${s.echoes} · RUNS ${s.runs} · DEEPEST ${Math.round(s.bestDistance)} M · SLAIN ${s.totalKills}` : 'The lantern is lit. The fog is waiting.';
@@ -180,6 +191,12 @@ export class UI {
     vol.value = String(s.volume);
     const gore = $<HTMLInputElement>('#o-gore');
     gore.value = String(s.gore);
+    const dyn = $<HTMLInputElement>('#o-dyn');
+    dyn.checked = s.dynamicRes !== false;
+    dyn.onchange = () => {
+      s.dynamicRes = dyn.checked;
+      this.onSettings(s);
+    };
     const upd = () => {
       s.quality = q.value;
       s.sensitivity = +sens.value;
@@ -313,6 +330,76 @@ export class UI {
     const deg = ((-s.yaw * 180) / Math.PI) % 360;
     const px = ((deg + 360) % 360) / 22.5 * 45;
     strip.style.transform = `translateX(${180 - 22.5 - px - 16 * 45}px)`;
+    const mk = this.root.querySelector('#h-marker') as HTMLElement;
+    if (s.beacon) {
+      const x = Math.max(-170, Math.min(170, -s.beacon.rel * 114.6));
+      mk.style.display = 'block';
+      mk.style.transform = `translateX(${x}px)`;
+      mk.style.opacity = Math.abs(x) >= 170 ? '0.45' : '1';
+    } else mk.style.display = 'none';
+    const roman = ['I', 'II', 'III', 'IV', 'V', 'VI', 'VII', 'VIII', 'IX', 'X'];
+    this.set('#h-tier', 'text', roman[Math.min(9, s.tier)] ?? String(s.tier + 1));
+    const obj = s.surge
+      ? '<span style="color:#d4776b">THE FOG SURGES — SURVIVE</span>'
+      : s.beaconsLit >= s.beaconsNeeded
+        ? '<span style="color:#9fb6d4">THE WARDEN STIRS</span>'
+        : `BEACONS KINDLED ${s.beaconsLit} / ${s.beaconsNeeded}${s.beacon ? ` · NEAREST ${Math.round(s.beacon.dist)} M` : ''}`;
+    if (this.hudCache.obj !== obj) {
+      this.hudCache.obj = obj;
+      (this.root.querySelector('#h-objective') as HTMLElement).innerHTML = obj;
+    }
+  }
+
+  bossBar(name: string | null, hp = 0, posture = 0) {
+    const el = this.root.querySelector('#bossbar') as HTMLElement;
+    el.classList.toggle('hidden', !name);
+    if (!name) return;
+    this.set('#bossbar .bname', 'text', name);
+    this.set('#bossbar .bfill', 'width', (Math.max(0, hp) * 100).toFixed(1) + '%');
+    this.set('#bossbar .bpost', 'width', (Math.max(0, posture) * 100).toFixed(1) + '%');
+  }
+
+  private barPool: HTMLElement[] = [];
+  enemyBars(bars: EnemyBar[]) {
+    const host = this.root.querySelector('#ebars') as HTMLElement;
+    while (this.barPool.length < bars.length) {
+      const d = document.createElement('div');
+      d.className = 'ebar';
+      d.innerHTML = '<i class="h"></i><i class="p"></i>';
+      host.appendChild(d);
+      this.barPool.push(d);
+    }
+    this.barPool.forEach((d, i) => {
+      const b = bars[i];
+      if (!b) {
+        d.style.display = 'none';
+        return;
+      }
+      d.style.display = 'block';
+      d.style.transform = `translate(${b.x - 30}px, ${b.y}px)`;
+      d.classList.toggle('broken', b.broken);
+      d.classList.toggle('elite', b.elite);
+      (d.firstElementChild as HTMLElement).style.width = (b.hp * 100).toFixed(0) + '%';
+      (d.lastElementChild as HTMLElement).style.width = (b.posture * 100).toFixed(0) + '%';
+    });
+  }
+
+  /** Flash a damage arc pointing at an attacker; `rel` is radians, 0 = ahead, + = left. */
+  hurtFrom(rel: number) {
+    const el = this.root.querySelector('#hurtdir') as HTMLElement;
+    el.style.transform = `translate(-50%, -50%) rotate(${-rel}rad)`;
+    el.classList.remove('on');
+    void el.offsetWidth;
+    el.classList.add('on');
+  }
+
+  hint(text: string | null) {
+    const el = this.root.querySelector('#hint') as HTMLElement;
+    const v = text ?? '';
+    if (this.hudCache.hint === v) return;
+    this.hudCache.hint = v;
+    el.innerHTML = v;
+    el.style.opacity = v ? '1' : '0';
   }
 
   hitMarker() {

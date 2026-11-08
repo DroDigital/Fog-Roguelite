@@ -70,6 +70,45 @@ export class Input {
     else this.release(code);
   }
 
+  /** Standard-mapping gamepad: buttons and sticks become the same virtual codes as keyboard/mouse. */
+  padActive = false;
+  private padDown = new Set<string>();
+  pollGamepad(dt: number) {
+    const pads = navigator.getGamepads?.() ?? [];
+    const gp = Array.from(pads).find((p) => p && p.connected && p.mapping === 'standard');
+    if (!gp) return;
+    const want = new Set<string>();
+    const btn = (i: number) => !!gp.buttons[i] && (gp.buttons[i].pressed || gp.buttons[i].value > 0.4);
+    const map: [number, string][] = [
+      [0, 'Space'], // A: dodge
+      [1, 'KeyF'], // B: kick
+      [2, 'KeyE'], // X: interact / execute
+      [3, 'PadSwap'], // Y: swap weapon
+      [4, 'KeyQ'], // LB: vial
+      [5, 'KeyR'], // RB: reload
+      [6, 'Mouse2'], // LT: block / aim
+      [7, 'Mouse0'], // RT: strike
+      [9, 'PadStart'],
+      [10, 'ShiftLeft'], // L3: sprint
+      [12, 'PadUp'], [14, 'PadLeft'], [15, 'PadRight'],
+    ];
+    for (const [i, code] of map) if (btn(i)) want.add(code);
+    const lx = gp.axes[0] ?? 0, ly = gp.axes[1] ?? 0, rx = gp.axes[2] ?? 0, ry = gp.axes[3] ?? 0;
+    if (ly < -0.35) want.add('KeyW');
+    if (ly > 0.35) want.add('KeyS');
+    if (lx < -0.35) want.add('KeyA');
+    if (lx > 0.35) want.add('KeyD');
+    for (const c of want) if (!this.padDown.has(c)) this.press(c);
+    for (const c of this.padDown) if (!want.has(c)) this.release(c);
+    this.padDown = want;
+    const dz = (v: number) => (Math.abs(v) < 0.12 ? 0 : Math.sign(v) * Math.pow((Math.abs(v) - 0.12) / 0.88, 1.6));
+    const look = 900 * dt;
+    this.mouseDX += dz(rx) * look;
+    this.mouseDY += dz(ry) * look * 0.75;
+    if (want.size || Math.abs(rx) > 0.2 || Math.abs(ry) > 0.2) this.padActive = true;
+    if (this.padActive) this.locked = true;
+  }
+
   endFrame() {
     this.pressed.clear();
     this.released.clear();

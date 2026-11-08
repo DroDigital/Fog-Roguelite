@@ -14,6 +14,7 @@ import { FogSim } from '../world/FogSim';
 import { Gore } from './Gore';
 import { Enemy, Corpse, type EnemyKind } from './Enemy';
 import { J } from './Body';
+import { loadCreatureAssets } from './CreatureModel';
 import { Player } from './Player';
 import { Projectiles } from './Projectiles';
 import { makeWeaponMats, type WeaponMats } from './WeaponModels';
@@ -46,6 +47,15 @@ void main(){
 }`;
 
 interface Mote { mesh: THREE.Mesh; vel: THREE.Vector3; value: number; t: number; kind: 'echo' | 'xp' }
+interface Bile { mesh: THREE.Mesh; vel: THREE.Vector3; dmg: number; life: number }
+
+const HINTS: [number, string][] = [
+  [2, 'Tap <b>LMB</b> to strike, hold it for a heavy blow. Aim at a limb to take it.'],
+  [9, '<b>RMB</b> blocks. Block just as a blow lands to <b>parry</b>.'],
+  [16, 'Break a foe\'s guard with parries, heavy blows and kicks (<b>F</b>), then <b>E</b> to execute.'],
+  [24, 'Follow the ◆ on the compass. Kindle three beacons to call out the Warden.'],
+  [32, '<b>2</b> draws the crossbow. Bolts to the head kill. <b>Q</b> drinks a vial.'],
+];
 
 export class Game implements Ctx {
   renderer: THREE.WebGLRenderer;
@@ -75,6 +85,19 @@ export class Game implements Ctx {
   private flashes: LightSource[] = [];
   private pointPool: THREE.PointLight[] = [];
   private motes: Mote[] = [];
+  private biles: Bile[] = [];
+  private bileGeo = new THREE.SphereGeometry(0.11, 10, 8);
+  private bileMat = new THREE.MeshBasicMaterial({ color: new THREE.Color(2.2, 6, 0.6) });
+  private executionTarget: Enemy | null = null;
+  beaconsLit = 0;
+  readonly beaconsNeeded = 3;
+  tier = 0;
+  private boss: Enemy | null = null;
+  private bossPending = -1;
+  private surgeT = 0;
+  private surgeMix = 0;
+  private nextSurge = 200;
+  private nearestBeacon: { x: number; z: number; id: string; d: number } | null = null;
   private moteGeo = new THREE.SphereGeometry(0.035, 6, 5);
   private moteMat = new THREE.MeshBasicMaterial({ color: new THREE.Color(6, 9, 14) });
   private xpMat = new THREE.MeshBasicMaterial({ color: new THREE.Color(14, 8, 3) });
@@ -99,6 +122,7 @@ export class Game implements Ctx {
   private bloodSeed = 0;
   private menuAngle = 0;
   private lookTarget: Interactable | null = null;
+  private execCandidate: Enemy | null = null;
   private eyeLights: FogLight[] = [];
   private kills = 0;
   private severs = 0;
@@ -148,6 +172,12 @@ export class Game implements Ctx {
     if (this.state !== 'playing') return 'dodged';
     const r = this.player.receive(amount, from, opts);
     if (r === 'hit') {
+      const to = from.clone().sub(this.player.pos);
+      const ang = Math.atan2(-to.x, -to.z);
+      let rel = ang - this.player.yaw;
+      while (rel > Math.PI) rel -= Math.PI * 2;
+      while (rel < -Math.PI) rel += Math.PI * 2;
+      this.ui.hurtFrom(rel);
       this.damageFx = 1;
       this.bloodFx = Math.min(1, this.bloodFx + 0.25 + amount * 0.01);
       this.bloodSeed = Math.random() * 100;
@@ -165,6 +195,105 @@ export class Game implements Ctx {
     const local = p.clone().applyMatrix4(this.camera.matrixWorldInverse);
     return { dist: d, pan: clamp(local.x / Math.max(1, Math.abs(local.z) + Math.abs(local.x)), -1, 1) };
   }
+  spawnBile(from: THREE.Vector3, vel: THREE.Vector3, damage: number) {
+    const mesh = new THREE.Mesh(this.bileGeo, this.bileMat);
+    mesh.position.copy(from);
+    this.scene.add(mesh);
+    this.biles.push({ mesh, vel, dmg: damage, life: 5 });
+    const sp = this.pan(from);
+    audio.play('enemyAttack', { dist: sp.dist, pan: sp.pan, pitch: 1.7 });
+  }
+
+  summon(at: THREE.Vector3, n: number) {
+    this.ui.notify('THE FOG ANSWERS', 1.4);
+    for (let i = 0; i < n; i++) {
+      const a = (i / n) * Math.PI * 2 + Math.random();
+      const p = at.clone().add(new THREE.Vector3(Math.cos(a) * 9, 0, Math.sin(a) * 9));
+      this.spawnEnemy(Math.random() < 0.3 ? 'stalker' : 'hollow', p).alert();
+    }
+    this.fog.burst(at.x, at.z, 14, 14);
+  }
+
+  private updateBiles(dt: number) {
+    for (let i = this.biles.length - 1; i >= 0; i--) {
+      const b = this.biles[i];
+      b.life -= dt;
+      b.vel.y -= 9.81 * 0.6 * dt;
+      b.mesh.position.addScaledVector(b.vel, dt);
+      const p = b.mesh.position;
+      if (Math.random() < 0.6) this.gore.embers(p, 1, [1.5, 4, 0.4], 0.05);
+      const toEye = p.distanceTo(this.camera.position.clone().add(new THREE.Vector3(0, -0.35, 0)));
+      const ground = this.world.height(p.x, p.z);
+      let burst = false;
+      if (toEye < 0.6 && this.player.alive) {
+        const r = this.damagePlayer(b.dmg, p.clone().sub(b.vel.clone().normalize()));
+        if (r === 'hit') {
+          this.bloodFx = Math.min(1, this.bloodFx + 0.2);
+          this.bloodSeed = Math.random() * 100;
+        }
+        burst = true;
+      } else if (p.y < ground || b.life <= 0) {
+        burst = true;
+        if (Math.hypot(p.x - this.player.pos.x, p.z - this.player.pos.z) < 1.8) this.damagePlayer(b.dmg * 0.5, p, { unblockable: true });
+      }
+      if (burst) {
+        this.gore.embers(p, 25, [1.5, 4.5, 0.4], 0.8);
+        this.gore.dust(p, 6);
+        this.fog.burst(p.x, p.z, 4, 2.5);
+        const sp = this.pan(p);
+        audio.play('hitFlesh', { dist: sp.dist, pan: sp.pan, pitch: 1.6, vol: 0.6 });
+        this.scene.remove(b.mesh);
+        this.biles.splice(i, 1);
+      }
+    }
+  }
+
+  private onKick(origin: THREE.Vector3, dir: THREE.Vector3) {
+    let hit = false;
+    for (const e of this.enemies) {
+      if (!e.alive) continue;
+      if (e.joints[J.Pelvis].distanceTo(origin) < 1.3 * e.def.scale) {
+        e.kicked(dir, 1);
+        hit = true;
+      }
+    }
+    for (const c of this.corpses) if (c.push(origin, dir.clone().add(new THREE.Vector3(0, 0.4, 0)), 9, 1.2)) hit = true;
+    this.fog.splat(origin.x, origin.z, dir.x * 7, dir.z * 7, 1.4, 0.3);
+    if (hit) {
+      audio.play('boltHit', { pitch: 0.55 });
+      this.hitstop(0.05);
+      this.shake(0.2);
+    }
+  }
+
+  private onExecuteStrike() {
+    const e = this.executionTarget;
+    this.executionTarget = null;
+    if (!e || !e.alive) return;
+    const head = e.joints[J.Head].clone();
+    const dir = new THREE.Vector3().subVectors(head, this.camera.position).normalize();
+    audio.play('sever', { pitch: 0.85 });
+    audio.play('hitFlesh', { pitch: 0.7 });
+    this.hitstop(0.16);
+    this.bloodFx = Math.min(1, this.bloodFx + 0.55);
+    this.bloodSeed = Math.random() * 100;
+    this.gore.splash(head, dir.clone().add(new THREE.Vector3(0, 0.6, 0)).normalize(), 2.5);
+    this.wmats.bloodU.value = Math.min(1, this.wmats.bloodU.value + 0.25);
+    const s = this.player.stats;
+    if (e.def.boss) {
+      e.damage(e.maxHp * 0.2 * s.meleeDmg, head, dir, 'execute');
+      e.posture = 0;
+      e.brokenT = 0.01;
+      this.ui.notify('BRUTALISED', 1);
+    } else {
+      e.hit({ seg: 1, point: head, dir, damage: 1e4, sever: 50, blunt: false, stagger: 1, crit: true, source: 'melee' });
+      this.severs++;
+      this.ui.notify('EXECUTED', 1.1);
+    }
+    this.player.heal(s.maxHp * 0.12);
+    for (let i = 0; i < 3; i++) this.spawnMote(head, 'echo', 2);
+  }
+
   onPieceCreated(p: Corpse) {
     this.corpses.push(p);
     // cap remains so the world doesn't drown in bodies
@@ -185,6 +314,7 @@ export class Game implements Ctx {
     const nm = Math.min(5, echoes);
     for (let i = 0; i < nm; i++) this.spawnMote(chest, 'echo', Math.ceil(echoes / nm));
     this.gainXp(e.def.xp * (e.elite ? 2.5 : 1) * s.xpGain);
+    if (e.def.boss) this.onBossDefeated(e);
     const label = how.head ? 'BEHEADED' : how.severed ? 'DISMEMBERED' : how.crit ? 'BRUTALISED' : '';
     if (label) this.ui.feed(`${e.def.name} — ${label.toLowerCase()}`, '#c9b98c');
     // drops
@@ -195,6 +325,44 @@ export class Game implements Ctx {
     if (r.chance(0.12)) this.spawnSupply(e.pos.clone());
   }
 
+  private onBossDefeated(e: Enemy) {
+    this.boss = null;
+    this.tier++;
+    this.beaconsLit = 0;
+    this.ui.bossBar(null);
+    this.ui.notify('THE WARDEN IS ASHES', 3);
+    this.ui.feed(`Tier ${this.tier + 1}: the fog grows hungrier.`, '#d4776b');
+    audio.play('levelUp');
+    audio.play('death');
+    this.player.heal(this.player.stats.maxHp);
+    this.player.vials = Math.round(this.player.stats.vials);
+    const r = this.rng;
+    for (let i = 0; i < 2; i++) this.dropWeapon(randomWeapon(r, 3 + this.tier, this.player.stats.luck + 1), e.pos.clone().add(new THREE.Vector3(r.range(-2, 2), 0, r.range(-2, 2))));
+    this.flash(e.pos.clone().add(new THREE.Vector3(0, 2, 0)), new THREE.Color(0.6, 0.75, 1), 60, 25, 2);
+    this.fog.burst(e.pos.x, e.pos.z, 25, 30);
+    this.pendingLevels++;
+  }
+
+  private startSurge(dur: number) {
+    if (this.surgeT > 0) return;
+    this.surgeT = dur;
+    this.ui.notify('THE FOG THICKENS', 2.2);
+    audio.play('enemyScream', { pitch: 0.5, vol: 0.8 });
+    this.spawnT = 1;
+  }
+
+  private spawnBoss() {
+    const p = this.player.pos;
+    const a = this.player.yaw + (Math.random() - 0.5) * 1.2;
+    const at = new THREE.Vector3(p.x - Math.sin(a) * 24, 0, p.z - Math.cos(a) * 24);
+    this.boss = this.spawnEnemy('warden', at);
+    this.boss.alert();
+    this.ui.notify('THE DROWNED WARDEN RISES', 3);
+    audio.play('death');
+    this.fog.burst(at.x, at.z, 20, 20);
+    this.flash(at.clone().add(new THREE.Vector3(0, 3, 0)), new THREE.Color(0.5, 0.7, 1), 40, 20, 1.5);
+  }
+
   // ─────────────────────────────────────────────────────── boot
 
   async init() {
@@ -202,6 +370,7 @@ export class Game implements Ctx {
     this.tex = new TextureGen(r, Math.min(8, r.capabilities.getMaxAnisotropy()));
     this.noise3D = makeFogNoise3D(64);
     await assets.load();
+    await loadCreatureAssets(['hollow', 'stalker', 'weeper', 'brute', 'warden']);
     this.fog = new FogSim((x, z) => (this.world ? this.world.height(x, z) : 0));
     this.pipeline = new Pipeline(r, this.noise3D, this.fog);
     this.applySettings();
@@ -254,7 +423,7 @@ export class Game implements Ctx {
         enemies: this.enemies,
         corpses: this.corpses,
         scene: this.scene,
-        onBoltHit: (e, seg, point, dir, damage, crit) => this.onBoltHit(e, seg, point, dir, damage, crit),
+        onBoltHit: (e, seg, point, dir, damage, crit, t, from) => this.onBoltHit(e, seg, point, dir, damage, crit, t, from),
         onBoltImpact: (p, d, ex, surf) => this.onBoltImpact(p, d, ex, surf),
         pan: (p) => this.pan(p),
       },
@@ -275,7 +444,10 @@ export class Game implements Ctx {
         hitstop: (t) => this.hitstop(t),
         onMeleeHit: (e, seg, p, d, mv) => this.onMeleeHit(e, seg, p, d, mv),
         onPlayerDeath: () => this.onPlayerDeath(),
+        onKick: (o, d) => this.onKick(o, d),
+        onExecuteStrike: () => this.onExecuteStrike(),
         notify: (m) => this.ui.notify(m),
+        bloodiness: () => game.wmats.bloodU.value,
       },
       this.wmats,
     );
@@ -417,6 +589,19 @@ export class Game implements Ctx {
     this.usedPOIs.clear();
     this.triggeredLairs.clear();
     this.flashes.length = 0;
+    for (const b of this.biles) this.scene.remove(b.mesh);
+    this.biles.length = 0;
+    this.boss = null;
+    this.bossPending = -1;
+    this.beaconsLit = 0;
+    this.tier = 0;
+    this.surgeT = 0;
+    this.surgeMix = 0;
+    this.nextSurge = 200;
+    this.nearestBeacon = null;
+    this.executionTarget = null;
+    this.ui?.bossBar(null);
+    this.ui?.enemyBars([]);
     this.bloodFx = 0;
     this.damageFx = 0;
   }
@@ -462,11 +647,13 @@ export class Game implements Ctx {
       ['Creatures slain', String(this.kills)],
       ['Limbs severed', String(this.severs)],
       ['Level', String(this.level)],
+      ['Tier reached', String(this.tier + 1)],
       ['Echoes gathered', String(this.runEchoes)],
       ['Echoes from depth & slaughter', String(fromDist + fromKills)],
       ['Echoes remembered', `<b style="color:var(--gold)">+${total}</b>`],
     ]);
     this.state = 'dead';
+    audio.setBoss(false);
   }
 
   // ─────────────────────────────────────────────────────── progression
@@ -509,21 +696,23 @@ export class Game implements Ctx {
 
   // ─────────────────────────────────────────────────────── combat callbacks
 
-  private onMeleeHit(e: Enemy, seg: number, point: THREE.Vector3, dir: THREE.Vector3, mv: { heavy: boolean; dmgMult: number; severMult: number; riposte: boolean }) {
+  private onMeleeHit(e: Enemy, seg: number, point: THREE.Vector3, dir: THREE.Vector3, mv: { heavy: boolean; dmgMult: number; severMult: number; riposte: boolean; t: number }) {
     const w = this.player.melee.melee!;
     const s = this.player.stats;
     const crit = Math.random() < s.critChance + (mv.riposte ? 0.5 : 0);
     let dmg = w.damage * s.meleeDmg * mv.dmgMult * (crit ? s.critMult : 1) * (mv.riposte ? s.riposteMult : 1);
     if (s.executeBelow > 0 && e.hp / e.maxHp < s.executeBelow) dmg = 1e5;
-    const res = e.hit({ seg, point, dir, damage: dmg, sever: w.sever * s.severMult * mv.severMult, blunt: w.blunt, stagger: w.stagger * (mv.heavy ? 2 : 1), crit, source: 'melee', riposte: mv.riposte });
+    const res = e.hit({ seg, point, dir, damage: dmg, sever: w.sever * s.severMult * mv.severMult, blunt: w.blunt, stagger: w.stagger * (mv.heavy ? 2 : 1), crit, source: 'melee', riposte: mv.riposte, t: mv.t, from: this.camera.position.clone() });
     if (res.severed) this.severs++;
+    // the blade drags through flesh; harder when it cleaves bone
+    this.player.bite(w.blunt ? 0.05 : res.severed ? 0.11 : 0.075 + (mv.heavy ? 0.04 : 0));
     this.player.heal(dmg * s.lifesteal);
     if (!w.blunt && Math.random() < s.bleedChance) {
       e.bleed = 4;
       e.bleedT = 0.3;
     }
     const near = point.distanceTo(this.camera.position);
-    this.hitstop(0.05 + (mv.heavy ? 0.05 : 0) + (res.severed ? 0.05 : 0) + (crit ? 0.02 : 0));
+    this.hitstop(0.035 + (mv.heavy ? 0.05 : 0) + (res.severed ? 0.04 : 0) + (crit ? 0.02 : 0));
     this.shake(0.18 + (mv.heavy ? 0.2 : 0) + (res.severed ? 0.12 : 0));
     const sp = this.pan(point);
     audio.play('hitFlesh', { dist: sp.dist, pan: sp.pan, pitch: w.blunt ? 0.7 : 1 });
@@ -539,8 +728,8 @@ export class Game implements Ctx {
     this.wmats.bloodU.value = Math.min(1, this.wmats.bloodU.value + 0.02);
   }
 
-  private onBoltHit(e: Enemy, seg: number, point: THREE.Vector3, dir: THREE.Vector3, damage: number, crit: boolean) {
-    const res = e.hit({ seg, point, dir, damage, sever: 0.6 * this.player.stats.severMult, blunt: false, stagger: 1.4, crit, source: 'bolt' });
+  private onBoltHit(e: Enemy, seg: number, point: THREE.Vector3, dir: THREE.Vector3, damage: number, crit: boolean, t: number, from: THREE.Vector3) {
+    const res = e.hit({ seg, point, dir, damage, sever: 0.6 * this.player.stats.severMult, blunt: false, stagger: 1.4, crit, source: 'bolt', t, from });
     if (res.severed) this.severs++;
     this.player.heal(damage * this.player.stats.lifesteal);
     this.ui.hitMarker();
@@ -674,6 +863,26 @@ export class Game implements Ctx {
         this.gore.splash(it.pos.clone().add(new THREE.Vector3(0, 0.9, 0)), new THREE.Vector3(0, 1, 0), 1.5);
         setTimeout(() => this.offerBoons('BLOOD BUYS FORBIDDEN THINGS', true), 500);
         break;
+      case 'beacon': {
+        if (it.used) return;
+        it.used = true;
+        this.usedPOIs.add(it.id);
+        (it.obj.getObjectByName('flame') as THREE.Object3D).visible = true;
+        if (it.light) it.light.intensity = 60;
+        this.beaconsLit++;
+        audio.play('shrine');
+        audio.play('swingHeavy', { pitch: 0.3 });
+        const top = it.pos.clone().add(new THREE.Vector3(0, 7.7, 0));
+        this.gore.embers(top, 120, [16, 6, 1.5], 1.5);
+        this.flash(top, new THREE.Color(1, 0.55, 0.2), 80, 40, 1.2);
+        this.fog.burst(it.pos.x, it.pos.z, 18, 22);
+        this.gainXp(40);
+        this.player.heal(this.player.stats.maxHp * 0.35);
+        this.ui.notify(`BEACON KINDLED  ${this.beaconsLit} / ${this.beaconsNeeded}`, 2.5);
+        this.startSurge(26 + this.tier * 4);
+        if (this.beaconsLit >= this.beaconsNeeded && !this.boss) this.bossPending = 30;
+        break;
+      }
       case 'weapon': {
         const w = it.weapon!;
         const old = w.kind === 'melee' ? this.player.melee : this.player.ranged;
@@ -700,12 +909,27 @@ export class Game implements Ctx {
 
   private director(dt: number) {
     const p = this.player.pos;
-    this.difficulty = this.runTime / 300 + this.player.distance / 650;
+    this.difficulty = this.runTime / 300 + this.player.distance / 650 + this.tier * 0.7;
     const alive = this.enemies.filter((e) => e.alive).length;
-    const maxAlive = Math.min(16, Math.round(3 + this.difficulty * 3.2));
+    const surging = this.surgeT > 0;
+    const maxAlive = Math.min(surging ? 22 : 16, Math.round(3 + this.difficulty * 3.2) + (surging ? 7 : 0));
     this.spawnT -= dt;
-    if (this.spawnT <= 0 && alive < maxAlive) {
-      this.spawnT = Math.max(3.5, 11 - this.difficulty * 2.5) * (0.7 + Math.random() * 0.6);
+    // fog surges: periodic, and every time a beacon is kindled
+    this.nextSurge -= dt;
+    if (this.nextSurge <= 0) {
+      this.nextSurge = 170 + Math.random() * 110;
+      if (!this.boss) this.startSurge(24);
+    }
+    if (this.surgeT > 0) this.surgeT -= dt;
+    if (this.bossPending > 0) {
+      this.bossPending -= dt;
+      if (this.bossPending <= 0 && this.surgeT <= 0) {
+        this.bossPending = -1;
+        this.spawnBoss();
+      } else if (this.bossPending <= 0) this.bossPending = 1;
+    }
+    if (this.spawnT <= 0 && alive < maxAlive && !this.boss) {
+      this.spawnT = Math.max(3.5, 11 - this.difficulty * 2.5) * (0.7 + Math.random() * 0.6) * (surging ? 0.3 : 1);
       // emerge from the fog: behind or beside the player, just past visibility
       const ang = this.player.yaw + Math.PI + (Math.random() - 0.5) * 2.6;
       const dist = 26 + Math.random() * 12;
@@ -717,10 +941,11 @@ export class Game implements Ctx {
           { item: 'hollow', w: 10 },
           { item: 'stalker', w: 2 + this.difficulty * 4 },
           { item: 'brute', w: this.difficulty > 0.4 ? 0.8 + this.difficulty * 1.5 : 0 },
+          { item: 'weeper', w: this.difficulty > 0.25 ? 1 + this.difficulty * 1.6 : 0 },
         ]);
         const at = c.clone().add(new THREE.Vector3((Math.random() - 0.5) * 4, 0, (Math.random() - 0.5) * 4));
         const e = this.spawnEnemy(kind, at, { elite: r.chance(0.02 + this.difficulty * 0.03) });
-        if (r.chance(0.5)) e.alert();
+        if (surging || r.chance(0.5)) e.alert();
       }
     }
     // lairs: dormant groups that wake when you get close
@@ -734,7 +959,7 @@ export class Game implements Ctx {
     }
     // despawn stragglers far away
     for (const e of this.enemies) {
-      if (e.alive && e.pos.distanceTo(p) > 95) e.dispose();
+      if (e.alive && e.pos.distanceTo(p) > 95 && !e.def.boss) e.dispose();
     }
     for (let i = this.enemies.length - 1; i >= 0; i--) if (this.enemies[i].removed || !this.enemies[i].alive) this.enemies.splice(i, 1);
   }
@@ -757,12 +982,25 @@ export class Game implements Ctx {
     const realDt = Math.min(0.05, (now - this.last) / 1000);
     this.last = now;
     this.frame(realDt);
+    if (this.state === 'playing' && this.save.settings.dynamicRes !== false) this.pipeline.adapt(realDt);
   };
 
   /** Advance one frame (exposed so automated tests can step deterministically). */
   frame(realDt: number, render = true) {
     this.skipRender = !render;
+    this.input.pollGamepad(realDt);
+    if (this.input.wasPressed('PadStart')) {
+      if (this.state === 'playing') this.pause();
+      else if (this.state === 'paused') this.resume();
+      else if (this.state === 'menu' || this.state === 'dead') this.startRun();
+    }
+    if (this.state === 'levelup') {
+      const pick = this.input.wasPressed('PadLeft') ? 0 : this.input.wasPressed('PadUp') ? 1 : this.input.wasPressed('PadRight') ? 2 : -1;
+      if (pick >= 0) document.querySelectorAll<HTMLElement>('#l-choices .choice')[pick]?.click();
+    }
     let dt = realDt;
+    const ex = this.player?.executing;
+    if (ex && ex.t > 0.2 && ex.t < 0.75) dt *= 0.45;
     if (this.hitstopT > 0) {
       this.hitstopT -= realDt;
       dt *= 0.04;
@@ -821,7 +1059,13 @@ export class Game implements Ctx {
           b.pos.x -= (dx / d) * push; b.pos.z -= (dz / d) * push;
         }
       }
-    for (const c of this.corpses) c.update(dt, this);
+    for (const c of this.corpses) {
+      c.update(dt, this);
+      if (c.owner && !c.pooled && c.rag.sleeping && c.rag.pos[0]) {
+        c.pooled = true;
+        this.gore.pool(c.rag.pos[0].x, c.rag.pos[0].z, 1.3 + Math.random() * 0.8);
+      }
+    }
     // fade very old remains far away
     for (let i = this.corpses.length - 1; i >= 0; i--) {
       const c = this.corpses[i];
@@ -831,6 +1075,7 @@ export class Game implements Ctx {
       }
     }
     this.projectiles.update(dt);
+    this.updateBiles(dt);
 
     // motes home in on the lantern
     const target = this.camera.position.clone().add(new THREE.Vector3(0, -0.5, 0));
@@ -882,11 +1127,36 @@ export class Game implements Ctx {
       };
       for (const it of this.interactables.values()) consider(it);
       for (const it of this.drops) consider(it);
-      if (this.lookTarget && this.input.wasPressed('KeyE')) this.interact(this.lookTarget);
+      // guard-broken foes can be executed
+      let exec: Enemy | null = null;
+      if (!pl.executing) {
+        let bestE = 1e9;
+        for (const e of this.enemies) {
+          if (!e.canBeExecuted) continue;
+          const to = e.joints[J.Chest].clone().sub(this.camera.position);
+          const d = to.length();
+          if (d > 2.4 + e.def.scale * 0.6) continue;
+          const dot = to.normalize().dot(fwd);
+          if (dot < 0.55) continue;
+          if (d < bestE) {
+            bestE = d;
+            exec = e;
+          }
+        }
+      }
+      if (exec) {
+        this.lookTarget = null;
+        if (this.input.wasPressed('KeyE')) {
+          this.executionTarget = exec;
+          exec.brokenT = Math.max(exec.brokenT, 1.5);
+          pl.beginExecution(exec.joints[J.Head]);
+        }
+      } else if (this.lookTarget && this.input.wasPressed('KeyE')) this.interact(this.lookTarget);
+      this.execCandidate = exec;
     }
     const lt = this.lookTarget as Interactable | null;
     const label = lt?.label() ?? '';
-    this.ui.prompt(lt && label ? `<kbd>E</kbd>${label}` : null);
+    this.ui.prompt(this.execCandidate ? `<kbd>E</kbd><span style="color:#ffe1a0">Execute</span>` : lt && label ? `<kbd>E</kbd>${label}` : null);
     if (lt && lt.kind === 'weapon') this.ui.lootCard(lt.weapon!, lt.weapon!.kind === 'melee' ? pl.melee : pl.ranged);
     else this.ui.lootCard(null, null);
 
@@ -903,7 +1173,8 @@ export class Game implements Ctx {
 
     // audio
     const near = this.enemies.reduce((m, e) => (e.alive && e.state !== 'lurk' ? Math.min(m, e.pos.distanceTo(pl.pos)) : m), 99);
-    audio.update(realDt, this.time, clamp(1 - near / 25, 0, 1), pl.hp / pl.stats.maxHp);
+    audio.update(realDt, this.time, Math.max(clamp(1 - near / 18, 0, 1), this.surgeT > 0 ? 0.6 : 0), pl.hp / pl.stats.maxHp);
+    audio.setBoss(!!(this.boss && this.boss.alive));
 
     // HUD
     const w = pl.active === 'melee' ? pl.melee : pl.ranged;
@@ -911,8 +1182,56 @@ export class Game implements Ctx {
       hp: pl.hp, maxHp: pl.stats.maxHp, st: pl.stamina, maxSt: pl.stats.maxStamina, xp: this.xp, xpNext: this.xpNext(), level: this.level,
       vials: pl.vials, bolts: pl.bolts, maxBolts: Math.round(pl.stats.bolts), weapon: w, active: pl.active,
       echoes: this.runEchoes, distance: pl.distance, kills: this.kills, yaw: pl.yaw, time: this.time,
+      beacon: this.beaconHud(), beaconsLit: this.beaconsLit, beaconsNeeded: this.beaconsNeeded, tier: this.tier, surge: this.surgeT > 0,
     });
+    this.updateBars();
+    if (this.save.runs <= 2) {
+      const h = HINTS.filter(([t]) => this.runTime > t && this.runTime < t + 6.5).pop();
+      this.ui.hint(h ? h[1] : null);
+    } else this.ui.hint(null);
+    // fog surge thickens the mist
+    this.surgeMix = damp(this.surgeMix, this.surgeT > 0 ? 1 : 0, 0.8, realDt);
+    this.pipeline.fogMat.uniforms.uDensity.value = 0.085 * (1 + this.surgeMix * 0.75 + this.tier * 0.08);
     this.ui.tick(realDt);
+  }
+
+  private beaconHud() {
+    if (this.boss || this.beaconsLit >= this.beaconsNeeded) {
+      this.nearestBeacon = null;
+      return null;
+    }
+    // finding beacons is cheap (pure hashing), refresh twice a second
+    if (!this.nearestBeacon || Math.floor(this.time * 2) !== Math.floor((this.time - 1 / 60) * 2)) {
+      const p = this.player.pos;
+      this.nearestBeacon = this.world.beaconsNear(p.x, p.z, 520).find((b) => !this.usedPOIs.has(b.id)) ?? null;
+    }
+    const b = this.nearestBeacon;
+    if (!b) return null;
+    const p = this.player.pos;
+    const ang = Math.atan2(-(b.x - p.x), -(b.z - p.z));
+    let rel = ang - this.player.yaw;
+    while (rel > Math.PI) rel -= Math.PI * 2;
+    while (rel < -Math.PI) rel += Math.PI * 2;
+    return { rel, dist: Math.hypot(b.x - p.x, b.z - p.z) };
+  }
+
+  private updateBars() {
+    const bars: { x: number; y: number; hp: number; posture: number; broken: boolean; elite: boolean }[] = [];
+    const w = window.innerWidth, h = window.innerHeight;
+    const v = new THREE.Vector3();
+    for (const e of this.enemies) {
+      if (!e.alive || e.def.boss) continue;
+      const recent = this.time - e.lastHitTime < 6 || e.posture > 0 || e.elite;
+      if (!recent) continue;
+      v.copy(e.joints[J.Head]).add(new THREE.Vector3(0, 0.35 * e.def.scale, 0));
+      if (v.distanceTo(this.camera.position) > 22) continue;
+      v.project(this.camera);
+      if (v.z > 1 || Math.abs(v.x) > 1 || Math.abs(v.y) > 1) continue;
+      bars.push({ x: (v.x * 0.5 + 0.5) * w, y: (-v.y * 0.5 + 0.5) * h, hp: Math.max(0, e.hp / e.maxHp), posture: e.posture / e.def.posture, broken: e.state === 'broken', elite: e.elite });
+    }
+    this.ui.enemyBars(bars);
+    if (this.boss && this.boss.alive) this.ui.bossBar(this.boss.def.name.toUpperCase(), this.boss.hp / this.boss.maxHp, this.boss.posture / this.boss.def.posture);
+    else this.ui.bossBar(null);
   }
 
   private updateWorldAndRender(dt: number, realDt: number) {
@@ -970,7 +1289,7 @@ export class Game implements Ctx {
     if (this.state !== 'menu') {
       const lp = new THREE.Vector3();
       lantern.getWorldPosition(lp);
-      fogLights.push({ pos: lp, color: lantern.color, intensity: lantern.intensity * 0.14, radius: 16 * this.player.stats.lanternRadius });
+      fogLights.push({ pos: lp, color: lantern.color, intensity: lantern.intensity * 0.05, radius: 16 * this.player.stats.lanternRadius });
     }
     for (const L of this.lights) {
       if (fogLights.length >= 6) break;

@@ -26,5 +26,7 @@ export interface Ctx {
   damagePlayer(amount: number, from: THREE.Vector3, opts?: { unblockable?: boolean; knock?: number }): HitResult;
   onEnemyKilled(e: unknown, how: { severed: boolean; head: boolean; crit: boolean }): void;
   onPieceCreated(p: Corpse): void;
+  spawnBile(from: THREE.Vector3, vel: THREE.Vector3, damage: number): void;
+  summon(at: THREE.Vector3, n: number): void;
   pan(p: THREE.Vector3): { dist: number; pan: number };
 }

@@ -102,6 +102,10 @@ class ParticleSet {
 
 interface Emitter { parent: THREE.Object3D; local: THREE.Vector3; dir: THREE.Vector3; t: number; dur: number; rate: number; acc: number; power: number }
 interface Gib { mesh: THREE.Mesh; vel: THREE.Vector3; spin: THREE.Vector3; life: number; resting: boolean }
+const ROPE_N = 16;
+const ROPE_R = 6;
+interface Rope { parent: THREE.Object3D; local: THREE.Vector3; p: THREE.Vector3[]; q: THREE.Vector3[]; mesh: THREE.Mesh; age: number; attached: boolean }
+interface Pool { im: THREE.InstancedMesh; slot: number; x: number; y: number; z: number; rot: number; size: number; max: number }
 
 function makeSplatTexture(seed: number): THREE.CanvasTexture {
   const S = 256;
@@ -153,6 +157,17 @@ export class Gore {
   private decalCount = 0;
   private readonly DECALS = 220;
   private gibs: Gib[] = [];
+  private ropes: Rope[] = [];
+  private pools: Pool[] = [];
+  private boneMat = new THREE.MeshStandardMaterial({ color: 0xd9ccaa, roughness: 0.45 });
+  private boneGeo = (() => {
+    const g = new THREE.CylinderGeometry(0.008, 0.014, 0.12, 5);
+    const p = g.attributes.position as THREE.BufferAttribute;
+    for (let i = 0; i < p.count; i++) if (p.getY(i) > 0.05) p.setX(i, p.getX(i) + (Math.random() - 0.5) * 0.02);
+    g.computeVertexNormals();
+    return g;
+  })();
+  private gutMat = new THREE.MeshPhysicalMaterial({ color: new THREE.Color(0.42, 0.1, 0.11), roughness: 0.25, clearcoat: 1, clearcoatRoughness: 0.15, sheen: 0.8, sheenColor: new THREE.Color(0.8, 0.3, 0.3) });
   private gibGeo: THREE.BufferGeometry[];
   private _v = new THREE.Vector3();
   private _d = new THREE.Vector3();
@@ -241,7 +256,135 @@ export class Gore {
     }
   }
 
-  gibsAt(p: THREE.Vector3, dir: THREE.Vector3, n: number) {
+  /** Splintered bone shards. */
+  bones(p: THREE.Vector3, dir: THREE.Vector3, n: number) {
+    this.gibsAt(p, dir, n, true);
+  }
+
+  /** A length of entrails spilling from a wound; stays attached to its parent bone. */
+  entrails(parent: THREE.Object3D, world: THREE.Vector3, dir: THREE.Vector3) {
+    if (this.intensity < 0.2) return;
+    if (this.ropes.length >= 8) {
+      const old = this.ropes.shift()!;
+      this.group.remove(old.mesh);
+      old.mesh.geometry.dispose();
+    }
+    parent.updateWorldMatrix(true, false);
+    const local = parent.worldToLocal(world.clone());
+    const p: THREE.Vector3[] = [];
+    const q: THREE.Vector3[] = [];
+    for (let i = 0; i < ROPE_N; i++) {
+      const v = world.clone().addScaledVector(dir, i * 0.01).add(new THREE.Vector3(0, -i * 0.012, 0));
+      p.push(v);
+      q.push(v.clone().addScaledVector(dir, -0.02 - Math.random() * 0.02));
+    }
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(ROPE_N * ROPE_R * 3), 3).setUsage(THREE.DynamicDrawUsage));
+    geo.setAttribute('normal', new THREE.BufferAttribute(new Float32Array(ROPE_N * ROPE_R * 3), 3).setUsage(THREE.DynamicDrawUsage));
+    const idx: number[] = [];
+    for (let i = 0; i < ROPE_N - 1; i++)
+      for (let k = 0; k < ROPE_R; k++) {
+        const a = i * ROPE_R + k, b = i * ROPE_R + ((k + 1) % ROPE_R), c = a + ROPE_R, d = b + ROPE_R;
+        idx.push(a, c, b, b, c, d);
+      }
+    geo.setIndex(idx);
+    const mesh = new THREE.Mesh(geo, this.gutMat);
+    mesh.frustumCulled = false;
+    mesh.castShadow = true;
+    this.group.add(mesh);
+    this.ropes.push({ parent, local, p, q, mesh, age: 0, attached: true });
+  }
+
+  /** A pool of blood that slowly spreads beneath a body. */
+  pool(x: number, z: number, max: number) {
+    const im = this.decals[this.decalNext % 4];
+    const slot = Math.floor(this.decalNext / 4) % im.instanceMatrix.count;
+    this.decalNext = (this.decalNext + 1) % this.DECALS;
+    im.count = Math.max(im.count, slot + 1);
+    this.pools = this.pools.filter((p) => !(p.im === im && p.slot === slot));
+    this.pools.push({ im, slot, x, y: this.world.height(x, z) + 0.025, z, rot: Math.random() * 6.28, size: 0.2, max });
+    if (this.pools.length > 16) this.pools.shift();
+  }
+
+  private updateRopes(dt: number) {
+    const g = -9.81 * dt * dt;
+    const seg = 0.055;
+    const tmp = new THREE.Vector3(), t = new THREE.Vector3(), u = new THREE.Vector3(), w = new THREE.Vector3();
+    for (const r of this.ropes) {
+      r.age += dt;
+      if (r.attached && !r.parent.parent) r.attached = false;
+      for (let i = 0; i < ROPE_N; i++) {
+        const p = r.p[i], q = r.q[i];
+        const vx = (p.x - q.x) * 0.985, vy = (p.y - q.y) * 0.985, vz = (p.z - q.z) * 0.985;
+        q.copy(p);
+        p.set(p.x + vx, p.y + vy + g, p.z + vz);
+      }
+      if (r.attached) {
+        r.parent.updateWorldMatrix(true, false);
+        r.p[0].copy(r.local).applyMatrix4(r.parent.matrixWorld);
+      }
+      for (let it = 0; it < 6; it++) {
+        for (let i = 0; i < ROPE_N - 1; i++) {
+          const a = r.p[i], b = r.p[i + 1];
+          tmp.subVectors(b, a);
+          const d = tmp.length() || 1e-6;
+          const diff = (d - seg) / d;
+          if (i === 0 && r.attached) b.addScaledVector(tmp, -diff);
+          else {
+            a.addScaledVector(tmp, diff * 0.5);
+            b.addScaledVector(tmp, -diff * 0.5);
+          }
+        }
+        for (let i = 0; i < ROPE_N; i++) {
+          const p = r.p[i];
+          const h = this.world.height(p.x, p.z) + 0.025;
+          if (p.y < h) {
+            p.y = h;
+            r.q[i].x += (p.x - r.q[i].x) * 0.5;
+            r.q[i].z += (p.z - r.q[i].z) * 0.5;
+          }
+        }
+      }
+      // dripping
+      if (Math.random() < dt * 6) {
+        const k = (Math.random() * ROPE_N) | 0;
+        this.blood.spawn(PT.Droplet, r.p[k].x, r.p[k].y, r.p[k].z, 0, -0.5, 0, 1.2, 0.012, 0.18, 0.005, 0.006, 0.2, 1);
+      }
+      // rebuild the tube
+      const pos = r.mesh.geometry.attributes.position as THREE.BufferAttribute;
+      const nor = r.mesh.geometry.attributes.normal as THREE.BufferAttribute;
+      for (let i = 0; i < ROPE_N; i++) {
+        const a = r.p[Math.max(0, i - 1)], b = r.p[Math.min(ROPE_N - 1, i + 1)];
+        t.subVectors(b, a).normalize();
+        u.set(0, 1, 0);
+        if (Math.abs(t.y) > 0.9) u.set(1, 0, 0);
+        w.crossVectors(t, u).normalize();
+        u.crossVectors(w, t).normalize();
+        const rad = 0.022 * (1 + 0.25 * Math.sin(i * 1.9)) * (i === ROPE_N - 1 ? 0.6 : 1);
+        for (let k = 0; k < ROPE_R; k++) {
+          const ang = (k / ROPE_R) * Math.PI * 2;
+          const cx = Math.cos(ang), sy = Math.sin(ang);
+          const nx = u.x * cx + w.x * sy, ny = u.y * cx + w.y * sy, nz = u.z * cx + w.z * sy;
+          const o = i * ROPE_R + k;
+          pos.setXYZ(o, r.p[i].x + nx * rad, r.p[i].y + ny * rad, r.p[i].z + nz * rad);
+          nor.setXYZ(o, nx, ny, nz);
+        }
+      }
+      pos.needsUpdate = true;
+      nor.needsUpdate = true;
+    }
+    // spreading pools
+    for (const pl of this.pools) {
+      if (pl.size >= pl.max) continue;
+      pl.size = Math.min(pl.max, pl.size + dt * 0.12);
+      this._q.setFromAxisAngle(new THREE.Vector3(0, 1, 0), pl.rot);
+      this._m.compose(this._v.set(pl.x, pl.y, pl.z), this._q, new THREE.Vector3(pl.size, 1, pl.size));
+      pl.im.setMatrixAt(pl.slot, this._m);
+      pl.im.instanceMatrix.needsUpdate = true;
+    }
+  }
+
+  gibsAt(p: THREE.Vector3, dir: THREE.Vector3, n: number, bone = false) {
     n = Math.round(n * this.intensity);
     for (let i = 0; i < n; i++) {
       let gib: Gib;
@@ -253,6 +396,8 @@ export class Gore {
         this.group.add(mesh);
         gib = { mesh, vel: new THREE.Vector3(), spin: new THREE.Vector3(), life: 0, resting: false };
       }
+      gib.mesh.material = bone ? this.boneMat : this.gibMat;
+      gib.mesh.geometry = bone ? this.boneGeo : this.gibGeo[i % 3];
       gib.mesh.position.copy(p);
       gib.mesh.scale.setScalar(0.6 + Math.random() * 1.2);
       gib.vel.set(dir.x * 3 + (Math.random() - 0.5) * 4, 1.5 + Math.random() * 3, dir.z * 3 + (Math.random() - 0.5) * 4);
@@ -281,6 +426,7 @@ export class Gore {
   }
 
   update(dt: number) {
+    this.updateRopes(dt);
     // emitters
     for (let e = this.emitters.length - 1; e >= 0; e--) {
       const em = this.emitters[e];

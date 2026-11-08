@@ -53,7 +53,7 @@ export interface MetaSave {
   bestDistance: number;
   totalKills: number;
   bestKills: number;
-  settings: { sensitivity: number; volume: number; quality: string; gore: number; fov: number };
+  settings: { sensitivity: number; volume: number; quality: string; gore: number; fov: number; dynamicRes?: boolean };
 }
 
 const KEY = 'fog-roguelite-save-v1';

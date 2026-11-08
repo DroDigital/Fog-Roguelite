@@ -178,12 +178,14 @@ Surf surf(vec2 uv) {
   float b = fbm(uv * 5.0, per, 6);
   float veins = pow(ridge(uv * 7.0 + 3.0, vec2(7.0), 4), 3.0);
   float rot = smoothstep(0.1, 0.5, fbm(uv * 3.0 + 13.0, vec2(3.0), 5));
-  vec3 v = voronoi(uv * 30.0, vec2(30.0));
-  float pores = smoothstep(0.25, 0.0, v.x) * 0.3;
+  vec3 v = voronoi(uv * 90.0, vec2(90.0));
+  float pores = smoothstep(0.18, 0.0, v.x) * 0.12;
+  float wrinkle = ridge(uv * vec2(18.0, 6.0) + 1.7, vec2(18.0, 6.0), 3);
   float wound = smoothstep(0.35, 0.6, fbm(uv * 4.0 + 21.0, vec2(4.0), 5));
   Surf s;
-  s.h = b * 0.3 + veins * 0.35 - pores - wound * 0.4;
-  vec3 skin = mix(vec3(0.15, 0.15, 0.145), vec3(0.27, 0.265, 0.25), b * 0.5 + 0.5);
+  s.h = b * 0.3 + veins * 0.35 - pores - wound * 0.4 + wrinkle * 0.25;
+  vec3 skin = mix(vec3(0.12, 0.125, 0.125), vec3(0.22, 0.22, 0.215), b * 0.5 + 0.5);
+  skin *= 0.85 + wrinkle * 0.2;
   skin = mix(skin, vec3(0.07, 0.08, 0.06), rot * 0.8);
   skin = mix(skin, vec3(0.07, 0.03, 0.06), veins * 0.7);
   skin = mix(skin, vec3(0.16, 0.012, 0.01), wound * 0.9);
@@ -229,7 +231,7 @@ Surf surf(vec2 uv) {
   float grain = fbm(uv * vec2(80.0, 4.0), vec2(80.0, 4.0), 3);
   Surf s;
   s.h = rings * 0.3 + grain * 0.3;
-  s.albedo = mix(vec3(0.07, 0.04, 0.022), vec3(0.20, 0.12, 0.065), rings * 0.6 + grain * 0.4 + 0.1);
+  s.albedo = mix(vec3(0.045, 0.026, 0.015), vec3(0.13, 0.08, 0.045), rings * 0.6 + grain * 0.4 + 0.1);
   s.rough = 0.7 - rings * 0.15;
   s.metal = 0.0;
   s.ao = 0.8 + rings * 0.2;

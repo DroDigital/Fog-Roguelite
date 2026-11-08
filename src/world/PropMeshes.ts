@@ -338,3 +338,43 @@ function erode(g: THREE.BufferGeometry, seed: number, amt: number): THREE.Buffer
   g.computeBoundingSphere();
   return g;
 }
+
+/** Beacon tower: stepped plinth, tall weathered column and an iron fire cage. */
+export function makeBeacon(): THREE.BufferGeometry {
+  const parts: THREE.BufferGeometry[] = [];
+  const add = (g: THREE.BufferGeometry, y: number) => {
+    g.translate(0, y, 0);
+    g.deleteAttribute('uv');
+    parts.push(g.toNonIndexed());
+  };
+  add(new THREE.CylinderGeometry(2.6, 3.0, 0.5, 10), 0.0);
+  add(new THREE.CylinderGeometry(2.0, 2.3, 0.5, 10), 0.5);
+  add(new THREE.CylinderGeometry(1.5, 1.7, 0.5, 10), 1.0);
+  add(new THREE.CylinderGeometry(0.75, 0.95, 5.5, 10, 6), 4.0);
+  add(new THREE.CylinderGeometry(1.15, 0.8, 0.5, 10), 6.95);
+  let g = mergeGeometries(parts)!;
+  g.deleteAttribute('normal');
+  g = mergeVertices(g);
+  g = erode(g, 31, 0.05);
+  return g;
+}
+
+/** Iron fire cage sitting on top of the beacon column. */
+export function makeBeaconCage(): THREE.BufferGeometry {
+  const parts: THREE.BufferGeometry[] = [];
+  for (let i = 0; i < 8; i++) {
+    const a = (i / 8) * Math.PI * 2;
+    const bar = new THREE.BoxGeometry(0.07, 1.3, 0.07);
+    bar.rotateZ(0.25);
+    bar.rotateY(-a);
+    bar.translate(Math.cos(a) * 0.95, 0.6, Math.sin(a) * 0.95);
+    parts.push(bar);
+  }
+  const ring = new THREE.TorusGeometry(1.15, 0.05, 5, 16);
+  ring.rotateX(Math.PI / 2);
+  ring.translate(0, 1.2, 0);
+  parts.push(ring.toNonIndexed());
+  const base = new THREE.CylinderGeometry(0.95, 0.75, 0.15, 12);
+  parts.push(base.toNonIndexed());
+  return mergeGeometries(parts.map((p) => { p.deleteAttribute('uv'); return p.index ? p.toNonIndexed() : p; }))!;
+}

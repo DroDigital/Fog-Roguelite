@@ -14,7 +14,8 @@ const RES = 32;
 const VIEW_R = 2;
 
 export interface Collider { x: number; z: number; r: number; h: number; y: number }
-export type POIKind = 'chest' | 'shrine' | 'lantern' | 'lair' | 'altar';
+export type POIKind = 'chest' | 'shrine' | 'lantern' | 'lair' | 'altar' | 'beacon';
+export const BEACON_REGION = 4; // chunks per side of a beacon region
 export interface POI { kind: POIKind; id: string; x: number; y: number; z: number; rot: number; tier: number }
 interface PropInst { type: string; variant: number; m: THREE.Matrix4 }
 
@@ -74,6 +75,8 @@ export class World {
     def('shrine', [PM.makeShrine()], ruin);
     const iron = new THREE.MeshStandardMaterial({ color: 0x1a1816, roughness: 0.55, metalness: 0.85 });
     def('lantern', [PM.makeLanternPost()], iron);
+    def('beacon', [PM.makeBeacon()], ruin);
+    def('beaconCage', [PM.makeBeaconCage()], iron, false);
 
     for (const pt of this.propTypes.values()) {
       for (const g of pt.variants) {
@@ -374,6 +377,21 @@ export class World {
       const x = x0 + rng.range(4, 28), z = z0 + rng.range(4, 28);
       c.pois.push({ kind: 'lair', id: `${c.key}:lair`, x, y: this.height(x, z), z, rot: 0, tier: t.biome(x, z) === Biome.Barrow ? 2 : 1 });
     }
+    // Beacon tower (one per region)
+    const b = this.beaconFor(Math.floor(c.cx / BEACON_REGION), Math.floor(c.cz / BEACON_REGION));
+    if (b && b.cx === c.cx && b.cz === c.cz) {
+      // clear the area around it
+      c.colliders = c.colliders.filter((col) => Math.hypot(col.x - b.x, col.z - b.z) > 6);
+      c.props = c.props.filter((p) => {
+        const e = p.m.elements;
+        return Math.hypot(e[12] - b.x, e[14] - b.z) > 6;
+      });
+      const by = this.height(b.x, b.z);
+      this.place(c, 'beacon', 0, b.x, b.z, 0, 1, { sink: 0.3, collider: 1.9, colH: 7 });
+      const cm = new THREE.Matrix4().makeTranslation(b.x, by - 0.3 + 7.2, b.z);
+      c.props.push({ type: 'beaconCage', variant: 0, m: cm });
+      c.pois.push({ kind: 'beacon', id: b.id, x: b.x, y: by, z: b.z, rot: 0, tier: 3 });
+    }
     // Starting vigil at the origin
     if (c.cx === 0 && c.cz === 0) {
       c.pois.push({ kind: 'shrine', id: 'origin:vigil', x: 4, y: this.height(4, 4), z: 4, rot: 0, tier: 0 });
@@ -445,6 +463,33 @@ export class World {
         }
       }
     return best;
+  }
+
+  /** Deterministic beacon location for a region (null if the region has none). */
+  beaconFor(rx: number, rz: number): { x: number; z: number; id: string; cx: number; cz: number } | null {
+    const h1 = hash2(rx, rz, this.seed + 71), h2 = hash2(rx, rz, this.seed + 72);
+    const cx = rx * BEACON_REGION + 1 + Math.floor(h1 * (BEACON_REGION - 2));
+    const cz = rz * BEACON_REGION + 1 + Math.floor(h2 * (BEACON_REGION - 2));
+    const x = cx * CHUNK + 6 + hash2(cx, cz, this.seed + 73) * 20;
+    const z = cz * CHUNK + 6 + hash2(cx, cz, this.seed + 74) * 20;
+    if (Math.hypot(x, z) < 70) return null;
+    return { x, z, id: `beacon:${rx},${rz}`, cx, cz };
+  }
+
+  /** Beacons within `radius` of a point, nearest first. */
+  beaconsNear(px: number, pz: number, radius: number) {
+    const R = CHUNK * BEACON_REGION;
+    const out: { x: number; z: number; id: string; d: number }[] = [];
+    const r0x = Math.floor((px - radius) / R), r1x = Math.floor((px + radius) / R);
+    const r0z = Math.floor((pz - radius) / R), r1z = Math.floor((pz + radius) / R);
+    for (let rz = r0z; rz <= r1z; rz++)
+      for (let rx = r0x; rx <= r1x; rx++) {
+        const b = this.beaconFor(rx, rz);
+        if (!b) continue;
+        const d = Math.hypot(b.x - px, b.z - pz);
+        if (d <= radius) out.push({ x: b.x, z: b.z, id: b.id, d });
+      }
+    return out.sort((a, b) => a.d - b.d);
   }
 
   allPOIs(): POI[] {

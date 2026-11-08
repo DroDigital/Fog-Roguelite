@@ -36,11 +36,17 @@ produces a static site in `dist/` that can be hosted anywhere.
 | Dodge (i-frames) | `Space` |
 | Strike (combo) / heavy | `LMB` tap / hold and release |
 | Block (parry if timed) / aim | `RMB` |
+| Kick (staggers, breaks guard, punts corpses) | `F` |
+| Execute a guard-broken foe | `E` |
 | Swap blade ↔ crossbow | `1` `2` or mouse wheel |
 | Reload | `R` |
 | Drink vial | `Q` |
-| Interact (chests, shrines, altars, loot) | `E` |
+| Interact (chests, shrines, altars, beacons, loot) | `E` |
 | Pause | `Esc` |
+
+Gamepads with the standard mapping also work. Sticks move and look, RT strikes, LT blocks or aims, A dodges,
+B kicks, X interacts or executes, Y swaps weapons, LB drinks a vial, RB reloads and L3 sprints. Start pauses,
+resumes or begins a run, and the D-pad picks level-up boons.
 
 ## What's in the game
 
@@ -57,8 +63,9 @@ shrines, blood altars and dormant creature lairs.
   volume drifting on the wind and terrain-relative height falloff. Moonlight is shadowed through the shadow
   map, which produces god rays between trees. Your lantern, shrines, explosions and creature eyes light the
   fog locally.
-- A depth-aware upsample, physically based bloom, ACES tone mapping, colour grading, film grain, chromatic
-  aberration and blood on the lens complete the frame.
+- Temporal accumulation reprojects last frame's fog to remove ray-march noise. A depth-aware upsample,
+  physically based bloom, ACES tone mapping, colour grading, film grain, chromatic
+  aberration, blood on the lens and FXAA complete the frame. Dynamic resolution holds about 60 fps.
 
 **Combat.**
 - *Melee.* Light attacks chain into a three-swing combo; hold to wind up a charged overhead. The blade is
@@ -67,17 +74,50 @@ shrines, blood altars and dormant creature lairs.
   blocking just before impact parries and staggers the attacker, and your next strike is a riposte.
 - *Ranged.* Crossbows fire physical bolts with drop. They lodge in whatever they hit and stay in severed
   limbs. Headshots kill.
-- *Dismemberment.* Each creature is a particle skeleton with ten limb segments. Each limb has its own health.
-  Cutting a limb splits it off at the joint into an independent Verlet ragdoll, with wound caps (flesh, bone)
-  on both sides, arterial spray that pulses from the stump, gibs and blood decals. Decapitation and
+- *Dismemberment.* Each creature is a particle skeleton with ten limb segments under a rigged, sculpted
+  skin, and each limb has its own health. A limb is cut **where the blade struck it**: mid-forearm,
+  mid-thigh, through the neck. The severed part becomes an independent Verlet ragdoll, with wound caps
+  (flesh, bone) on both sides, arterial spray pulsing from the stump, flesh gibs, bone splinters and blood
+  decals.
+- *Wounds and impairment.* Every hit opens a wound on the skin at the impact point, on the side the blow came
+  from; bolts leave entry and exit wounds. Effects depend on where the hit lands:
+  - Leg wounds make creatures limp, and losing a leg drops them to crawl after you, trailing blood.
+  - Losing arms weakens their attacks.
+  - Head blows leave them dazed.
+  - Deep belly cuts spill entrails, which dangle and drag on the ground.
+  - Bodies bleed out into spreading pools.
+- *Swings.* Every attack is a keyframed curve: anticipation, a slow load, a strike that accelerates through the
+  target, an overshooting follow-through where the wrist rolls over, then a settle.
+  - The camera leans into the swing, and you step into each strike.
+  - The blade drags as it bites through flesh before tearing free, and flicks blood off in the follow-through.
+  - A faint trail marks its path.
+  - Gauntleted arms hold the sword and lantern, solved with IK. Decapitation and
   severed legs are lethal. Blunt weapons crush skulls instead of cutting. On death the whole body becomes a
   ragdoll that you can keep hacking at.
 - *Feel.* Hit-stop, trauma-based camera shake, view-model sway and recoil, blood that builds up on your blade,
-  and fully synthesized positional audio (`src/engine/Audio.ts`).
+  and fully synthesized positional audio (`src/engine/Audio.ts`): war drums swell with the fight, and a
+  formant choir sings while the Warden lives.
 
-**Creatures.** Hollows (shamblers that reach for you), Mist Stalkers (fast, lunging pack hunters) and Barrow
-Brutes (armoured, slow, ground-slamming). Elites appear as difficulty rises. A director spawns them just
-beyond visibility, mostly behind you, so their eyes are often the first thing you see.
+- *Posture and executions.* Every hit, parry and kick erodes a foe's posture. When it breaks they drop to
+  their knees and you can **execute** them: a slow-motion finishing thrust that takes the head, heals you and
+  pays out extra Echoes. On the Warden it lands a huge blow instead.
+
+**Creatures.**
+- Hollows: shamblers that reach for you.
+- Mist Stalkers: fast, lunging pack hunters.
+- Weepers: they keep their distance and lob arcing bile from a swollen throat sac, and back off when you close in.
+- Barrow Brutes: armoured, slow, ground-slamming.
+- The Drowned Warden: a crowned boss with slams, wide sweeps and a charge. It calls the fog's children at
+  two-thirds and one-third health.
+
+Elites appear as difficulty rises. A director spawns creatures just beyond visibility, mostly behind you, so
+their eyes are often the first thing you see. Each creature carries its own blood: its skin darkens and glistens
+where you've cut it.
+
+**Run structure.** Beacon towers stand across the moor; the compass marks the nearest one. Kindling a beacon
+calls a **fog surge**: the mist thickens and the fog's children converge on you. Kindle three and the Warden
+rises. Felling it raises the **tier**: the fog grows denser and hungrier, and better loot drops. Surges also
+roll in on their own every few minutes.
 
 **Loot and progression.**
 - Weapons: longsword, greataxe, flanged mace, falchion, crossbow and arbalest, across five rarities
@@ -99,12 +139,47 @@ src/
   render/   GPU procedural PBR texture generator, material shader patches (triplanar, terrain splat, wind),
             post pipeline (volumetric fog, composite, bloom, final grade) and its GLSL
   world/    Terrain + biomes, chunk streaming / instancing / colliders, procedural prop meshes, fog simulation
-  game/     Game loop + director, Player (controller, melee sweep, crossbow), Body (skeleton, Verlet ragdoll,
+  game/     Game loop + director, Player (controller, melee sweep, crossbow), SwingAnim (keyframed swings,
+            IK arms, blade trail), CreatureModel (skinned creatures, cuts, wounds), Body (skeleton, Verlet ragdoll,
             IK, capsule tests), Enemy (anatomy, procedural animation, AI, damage + severing), Gore (particles,
             decals, arterial emitters, gibs), Projectiles, Loot, Stats, Progression, Interactables
   ui/       DOM HUD and menus
 tools/blender/export_fog_assets.py   Blender → GLB exporter that registers props in the asset manifest
 ```
+
+## Creature models (Blender, rigged)
+
+The creatures are sculpted, rigged and baked in Blender by `tools/blender/build_creatures.py`. The script needs
+no manual steps. For each creature it:
+
+1. builds a continuous body from a skin-modifier skeleton, plus anatomy: skull, brow, cheekbones, jaw, eye
+   sockets, a full rib cage, sternum, clavicles, scapulae, vertebrae, iliac crests, muscle masses, knees,
+   elbows, jointed fingers with claws, and toes;
+2. fuses everything with a voxel remesh into a single organic surface, then sculpts wrinkles, veins and lumps
+   into it with layered displacement;
+3. decimates a game mesh of about 14k triangles and bakes the sculpt's colour (blotches, bruising, veins,
+   cavity dirt) and ambient occlusion into its vertex colours with Cycles;
+4. rigs it to a 10-bone armature that matches the engine's limb segments, and exports a GLB and a JSON file
+   with the bind pose to `public/assets/creatures/`.
+
+```bash
+pip install bpy
+```
+
+```bash
+python tools/blender/build_creatures.py
+```
+
+The second command builds every creature; add ids such as `hollow brute` to build only those.
+`VIGIL_PREVIEW=<dir>` also writes Cycles turntable renders. Without the GLBs the game falls back to its
+procedural capsule bodies.
+
+In the engine (`src/game/CreatureModel.ts`) each creature is one skinned mesh on 20 bones: one per limb segment
+plus a spare stub bone per segment. Cutting a limb, at any point along it, re-weights the vertices beyond the
+cut onto the severed part's bones and drops the triangles that straddle the cut; wound caps cover both sides.
+Wounds are painted into a per-vertex attribute at the exact impact point, stretched along the blade's path,
+and the shader sinks and reddens them into raw, glistening meat. Seamless triplanar flesh detail is added in
+bind space, so the model needs no UV layout.
 
 ## Asset pipeline (Blender and libraries)
 
@@ -137,6 +212,11 @@ The URL parameters below make the game scriptable, for example from Playwright:
 `window.game` exposes the running instance. `game.input.inject('Mouse0', true)` simulates input.
 
 `npm run typecheck` type-checks the project.
+
+`npm run build && npm run smoke` runs an end-to-end smoke test (`scripts/smoke.mjs`). It serves the build,
+drives the game headlessly with Playwright, and asserts that melee kills, limb severing, executions, crossbow
+headshots, boss spawning and beacon generation all work, then soaks 3,000 frames of random input. It needs
+`playwright` and `npx playwright install chromium`.
 
 ## Roadmap to AAA
 

@@ -14,20 +14,19 @@ import { applyMods, baseStats, type Mod, type Stats } from './Stats';
 import type { Weapon, MeleeArchetype } from './Loot';
 import { buildMelee, buildCrossbow, buildLantern, type WeaponMats, type CrossbowModel } from './WeaponModels';
 import type { HitResult } from './Ctx';
+import { IDLE, BLOCK, MOVES, COMBO, evalMove, moveLength, buildArm, buildGauntlet, poseArm, BladeTrail, type Pose, type MoveDef, type Arm } from './SwingAnim';
 
-interface Pose { y: number; p: number; r: number; e: number }
-interface Move { from: Pose; to: Pose; wind: number; act: number; rec: number; dmg: number; sever: number; stamina: number; heavy?: boolean }
-interface AtkState { move: Move; name: string; t: number; hit: Set<number>; bounced: boolean; prevT: number }
-
-const IDLE: Pose = { y: 0.22, p: 0.72, r: -0.35, e: 0.36 };
-const BLOCK: Pose = { y: 1.25, p: 0.38, r: 0.25, e: 0.36 };
-const MOVES: Record<string, Move> = {
-  slashR: { from: { y: -1.45, p: 0.12, r: 0.1, e: 0.3 }, to: { y: 1.3, p: -0.2, r: 0.1, e: 0.4 }, wind: 0.17, act: 0.15, rec: 0.3, dmg: 1, sever: 1, stamina: 1 },
-  slashL: { from: { y: 1.3, p: 0.2, r: Math.PI - 0.1, e: 0.3 }, to: { y: -1.4, p: -0.15, r: Math.PI - 0.1, e: 0.4 }, wind: 0.17, act: 0.15, rec: 0.3, dmg: 1, sever: 1, stamina: 1 },
-  diag: { from: { y: -0.95, p: 1.15, r: 0.75, e: 0.3 }, to: { y: 0.85, p: -0.75, r: 0.75, e: 0.42 }, wind: 0.2, act: 0.15, rec: 0.32, dmg: 1.1, sever: 1.15, stamina: 1.1 },
-  heavy: { from: { y: -0.08, p: 2.3, r: Math.PI / 2, e: 0.26 }, to: { y: 0.06, p: -1.05, r: Math.PI / 2, e: 0.44 }, wind: 0.12, act: 0.19, rec: 0.5, dmg: 2.1, sever: 1.8, stamina: 1.9, heavy: true },
-};
-const COMBO = ['slashR', 'slashL', 'diag'];
+interface AtkState {
+  def: MoveDef;
+  name: string;
+  t: number;
+  prevT: number;
+  start: Pose;
+  hit: Set<number>;
+  bounced: boolean;
+  bite: number; // time left in the blade's bite (swing slows while it cuts through)
+  connected: boolean;
+}
 
 export interface PlayerHost {
   input: Input;
@@ -40,9 +39,12 @@ export interface PlayerHost {
   projectiles: Projectiles;
   time: number;
   hitstop(t: number): void;
-  onMeleeHit(e: Enemy, seg: number, point: THREE.Vector3, dir: THREE.Vector3, move: { heavy: boolean; dmgMult: number; severMult: number; riposte: boolean }): void;
+  onMeleeHit(e: Enemy, seg: number, point: THREE.Vector3, dir: THREE.Vector3, move: { heavy: boolean; dmgMult: number; severMult: number; riposte: boolean; t: number }): void;
   onPlayerDeath(): void;
+  onKick(origin: THREE.Vector3, dir: THREE.Vector3): void;
+  onExecuteStrike(): void;
   notify(msg: string): void;
+  bloodiness?(): number;
 }
 
 const _v = new THREE.Vector3();
@@ -120,6 +122,18 @@ export class Player {
   private lanternHolder = new THREE.Group();
   light: THREE.PointLight;
   private curPose: Pose = { ...IDLE };
+  private armR!: Arm;
+  private armL!: Arm;
+  private gauntlet!: THREE.Group;
+  private trail = new BladeTrail();
+  private trailOn = 0;
+  private swingYawV = 0;
+  private swingPitchV = 0;
+  private lastPose: Pose = { ...IDLE };
+  private stepV = 0;
+  private bladeTip = new THREE.Vector3();
+  private bladeTipPrev = new THREE.Vector3();
+  private flingT = 0;
   private extraMods: Mod[] = [];
   private metaMods: Mod[] = [];
 
@@ -133,13 +147,27 @@ export class Player {
     this.lanternHolder.scale.setScalar(0.8);
     this.lanternHolder.add(this.lantern.group);
     this.vm.add(this.lanternHolder);
-    this.light = new THREE.PointLight(new THREE.Color(1.0, 0.6, 0.3), 9, 20, 1.6);
+    this.light = new THREE.PointLight(new THREE.Color(1.0, 0.6, 0.3), 6.5, 20, 1.35);
     this.light.position.set(0, 0.0, 0);
     this.lantern.group.add(this.light);
     this.light.shadow.mapSize.set(512, 512);
     this.light.shadow.camera.near = 0.1;
     this.light.shadow.camera.far = 22;
     this.light.shadow.bias = -0.004;
+    const shin = new THREE.Mesh(new THREE.CylinderGeometry(0.06, 0.075, 0.5, 8), mats.leather);
+    shin.position.y = 0.25;
+    const sole = new THREE.Mesh(new THREE.BoxGeometry(0.13, 0.1, 0.3), mats.leather);
+    sole.position.set(0, -0.02, -0.08);
+    const plate = new THREE.Mesh(new THREE.BoxGeometry(0.14, 0.2, 0.04), mats.darkSteel);
+    plate.position.set(0, 0.25, -0.08);
+    this.boot.add(shin, sole, plate);
+    this.boot.visible = false;
+    this.vm.add(this.boot);
+    // arms: the sword hand on the right, the lantern hand on the left
+    this.armR = buildArm(this.vm, mats, 1);
+    this.armL = buildArm(this.vm, mats, -1);
+    this.gauntlet = buildGauntlet(mats);
+    this.handGroup.add(this.gauntlet);
   }
 
   setFov(f: number) {
@@ -181,6 +209,9 @@ export class Player {
 
   private showActive() {
     if (this.meleeModel) this.meleeModel.visible = this.active === 'melee';
+    if (this.armR) {
+      this.armR.upper.visible = this.armR.fore.visible = this.gauntlet.visible = this.active === 'melee';
+    }
     if (this.crossbow) this.crossbow.group.visible = this.active === 'ranged';
   }
 
@@ -290,7 +321,7 @@ export class Player {
     const world = this.host.world;
 
     // look (uses real dt so hitstop never freezes the mouse)
-    if (this.alive) {
+    if (this.alive && !this.executing) {
       const sens = 0.0022 * inp.sensitivity * (this.aim > 0.5 ? 0.6 : 1);
       this.yaw -= inp.mouseDX * sens;
       this.pitch -= inp.mouseDY * sens;
@@ -306,6 +337,7 @@ export class Player {
       if (inp.isDown('KeyA')) mx -= 1;
       if (inp.isDown('KeyD')) mx += 1;
     }
+    if (this.executing) mx = mz = 0;
     const ml = Math.hypot(mx, mz);
     if (ml > 0) {
       mx /= ml;
@@ -317,7 +349,7 @@ export class Player {
     const sprinting = this.alive && inp.isDown('ShiftLeft') && mz < 0 && this.stamina > 1 && !this.blocking && this.aim < 0.5 && !this.atk && this.healT <= 0;
     let speed = s.moveSpeed * (sprinting ? 1.6 : 1);
     if (this.blocking) speed *= 0.55;
-    if (this.atk) speed *= this.atk.move.heavy ? 0.35 : 0.7;
+    if (this.atk) speed *= this.atk.def.heavy ? 0.35 : 0.7;
     if (this.aim > 0.5) speed *= 0.6;
     if (this.healT > 0) speed *= 0.5;
     if (this.staggerT > 0) speed *= 0.2;
@@ -327,7 +359,7 @@ export class Player {
     }
 
     // dodge
-    if (this.alive && inp.wasPressed('Space') && this.dodgeT <= 0 && this.stamina >= s.dodgeCost * 0.5 && this.staggerT <= 0) {
+    if (this.alive && !this.executing && inp.wasPressed('Space') && this.dodgeT <= 0 && this.stamina >= s.dodgeCost * 0.5 && this.staggerT <= 0) {
       this.stamina -= s.dodgeCost;
       this.staminaDelay = 0.8;
       if (ml > 0) this.dodgeDir.set(wishX, 0, wishZ);
@@ -352,6 +384,12 @@ export class Player {
     } else {
       const accel = 12;
       this.vel.x = damp(this.vel.x, wishX * speed, accel, dt);
+      // stepping into a strike
+      if (this.stepV > 0.01) {
+        const fx = -Math.sin(this.yaw), fz = -Math.cos(this.yaw);
+        this.pos.x += fx * this.stepV * dt;
+        this.pos.z += fz * this.stepV * dt;
+      }
       this.vel.z = damp(this.vel.z, wishZ * speed, accel, dt);
     }
     const ox = this.pos.x, oz = this.pos.z;
@@ -414,7 +452,7 @@ export class Player {
     }
 
     // weapon swap
-    if (this.alive && (inp.wasPressed('Digit1') || inp.wasPressed('Digit2') || inp.wheel !== 0)) {
+    if (this.alive && (inp.wasPressed('Digit1') || inp.wasPressed('Digit2') || inp.wasPressed('PadSwap') || inp.wheel !== 0)) {
       const want = inp.wasPressed('Digit1') ? 'melee' : inp.wasPressed('Digit2') ? 'ranged' : this.active === 'melee' ? 'ranged' : 'melee';
       if (want !== this.active && !this.atk) {
         this.active = want;
@@ -426,7 +464,9 @@ export class Player {
     }
     this.swapT = Math.max(0, this.swapT - dt);
 
-    if (this.active === 'melee') this.updateMelee(dt);
+    this.updateKick(dt);
+    if (this.executing) this.updateExecution(dt);
+    else if (this.active === 'melee') this.updateMelee(dt);
     else this.updateRanged(dt);
 
     // ── camera
@@ -451,7 +491,10 @@ export class Player {
     const shR = Math.sin(t * 29.3 + 2) * sh * 0.05;
     const eyeH = 1.62 - (this.alive ? 0 : 1.3) - this.landDip - (this.healT > 0 ? 0.05 : 0);
     cam.position.set(this.pos.x + bobX * 0.3, this.pos.y + eyeH + bobY, this.pos.z);
-    _e.set(this.pitch + shY + this.recoil * 0.06 + this.hurtKick * 0.04, this.yaw + shX, shR + this.dodgeRoll + bobX * 0.15 + (this.alive ? 0 : 0.5), 'YXZ');
+    // the body follows the blade: yaw/roll lean into the swing, pitch dips on overheads
+    const torqueY = clamp(this.swingYawV * 0.012, -0.06, 0.06);
+    const torqueP = clamp(this.swingPitchV * 0.01, -0.05, 0.05);
+    _e.set(this.pitch + shY + this.recoil * 0.06 + this.hurtKick * 0.04 + torqueP, this.yaw + shX + torqueY, shR + this.dodgeRoll + bobX * 0.15 + (this.alive ? 0 : 0.5) - torqueY * 0.8, 'YXZ');
     cam.quaternion.setFromEuler(_e);
     const fovTarget = this.fovBase + (sprinting ? 7 : 0) + (this.dodgeT > 0 ? 6 : 0) - this.aim * 25;
     cam.fov = damp(cam.fov, fovTarget, 8, dt);
@@ -466,7 +509,7 @@ export class Player {
     this.lantern.group.rotation.z = Math.sin(this.bobPhase) * 0.12 * bobAmt + this.swayX * 4;
     this.lantern.group.rotation.x = Math.cos(this.bobPhase * 2) * 0.06 * bobAmt;
     const flick = 0.85 + 0.1 * Math.sin(t * 17.3) + 0.06 * Math.sin(t * 31.7 + 2) + 0.04 * Math.sin(t * 7.1);
-    this.light.intensity = 9 * flick * (this.alive ? 1 : 0.3);
+    this.light.intensity = 6.5 * flick * (this.alive ? 1 : 0.3);
     this.lantern.flame.scale.set(1, 1.8 * flick, 1);
   }
 
@@ -484,8 +527,10 @@ export class Player {
     this.blocking = wantBlock && this.stamina > 0;
     if (this.blocking) this.blockT += dt;
 
-    // attack input: tap = light combo, hold = charged heavy
-    if (canAct && !this.atk && !this.blocking) {
+    // attack input: tap = light combo, hold = charged heavy. A swing in its
+    // follow-through can be cancelled straight into the next combo strike.
+    const lateInSwing = this.atk && !this.atk.def.heavy && this.atk.t > this.atk.def.hit[1] + 0.06;
+    if (canAct && (!this.atk || lateInSwing) && !this.blocking) {
       if (inp.wasPressed('Mouse0')) this.charge = 0;
       if (this.charge >= 0) {
         if (inp.isDown('Mouse0')) {
@@ -494,16 +539,19 @@ export class Player {
         }
         if (inp.wasReleased('Mouse0') || !inp.isDown('Mouse0') || this.charge > 0.9) {
           const heavy = this.charge > 0.28;
-          const name = heavy ? 'heavy' : COMBO[this.comboT > 0 ? this.combo % COMBO.length : 0];
-          const mv = MOVES[name];
-          const cost = w.stamina * mv.stamina;
+          const chain = this.comboT > 0 || !!this.atk;
+          const name = heavy ? 'heavy' : COMBO[chain ? this.combo % COMBO.length : 0];
+          const def = MOVES[name];
+          const cost = w.stamina * def.stamina;
           if (this.stamina > 2) {
             this.stamina -= cost;
             this.staminaDelay = 0.7;
-            this.atk = { move: mv, name, t: 0, hit: new Set(), bounced: false, prevT: 0 };
-            this.combo = this.comboT > 0 ? this.combo + 1 : 1;
+            const t0 = heavy ? def.keys[def.holdKey!].t : 0;
+            this.atk = { def, name, t: t0, prevT: t0, start: { ...this.curPose }, hit: new Set(), bounced: false, bite: 0, connected: false };
+            this.combo = chain ? this.combo + 1 : 1;
             if (heavy) this.combo = 0;
             this.atkCharge = Math.min(1, this.charge / 0.9);
+            audio.play(heavy ? 'swingHeavy' : 'swing', { pitch: (1 / Math.sqrt(w.reach)) * (0.92 + Math.random() * 0.16) });
           }
           this.charge = -1;
         }
@@ -512,38 +560,42 @@ export class Player {
 
     let target: Pose = this.blocking ? BLOCK : IDLE;
     if (this.charge > 0.28 && !this.atk) {
-      // wind up the heavy while holding
-      const k = Math.min(1, (this.charge - 0.28) / 0.5);
-      target = lerpPose(IDLE, MOVES.heavy.from, k * 0.85, { ...IDLE });
+      // wind up the heavy while holding: blade drawn back over the shoulder, trembling with strain
+      const k = Math.min(1, (this.charge - 0.28) / 0.45);
+      const held = evalMove(MOVES.heavy, MOVES.heavy.keys[MOVES.heavy.holdKey!].t * k, this.curPose, { ...IDLE });
+      held.p += Math.sin(this.host.time * 37) * 0.006 * k;
+      target = held;
     }
+    this.stepV = damp(this.stepV, 0, 10, dt);
     if (this.atk) {
       const a = this.atk;
-      const mv = a.move;
-      const total = mv.wind + mv.act + mv.rec;
+      const def = a.def;
       a.prevT = a.t;
-      a.t += (dt * spd) / 1;
-      const wind = mv.heavy ? mv.wind * 0.6 : mv.wind;
-      if (a.t < wind) {
-        target = lerpPose(this.curPose, mv.from, THREE.MathUtils.smoothstep(a.t / wind, 0, 1), { ...IDLE });
-        if (a.prevT === 0) audio.play(mv.heavy ? 'swingHeavy' : 'swing', { pitch: 1 / Math.sqrt(w.reach) });
-      } else if (a.t < wind + mv.act) {
-        const k = (a.t - wind) / mv.act;
-        target = lerpPose(mv.from, mv.to, easeStrike(k), { ...IDLE });
-        if (!a.bounced) this.sweep(a, wind, dt);
-      } else {
-        const k = (a.t - wind - mv.act) / mv.rec;
-        target = lerpPose(mv.to, IDLE, THREE.MathUtils.smoothstep(k, 0, 1), { ...IDLE });
-      }
+      // while the blade bites into flesh the swing drags, then tears through
+      const rate = a.bite > 0 ? 0.16 : 1;
+      a.bite = Math.max(0, a.bite - dt);
+      a.t += dt * spd * rate;
+      const pose = evalMove(def, a.t, a.start, { ...IDLE });
       if (a.bounced) {
-        // recoil: snap back quickly
-        target = lerpPose(this.curPose, IDLE, 0.25, { ...IDLE });
+        // recoil off stone or earth: the arm jolts back
+        pose.e -= 0.08;
+        pose.p += 0.15;
       }
-      if (a.t >= total || (a.bounced && a.t > wind + mv.act * 0.5 + 0.18)) {
+      if (a.t >= def.hit[0] && a.t <= def.hit[1] && !a.bounced) {
+        this.stepV = Math.max(this.stepV, def.step * (a.connected ? 0.3 : 1));
+        this.sweep(a, dt);
+      }
+      // flick blood off the blade in the follow-through
+      if (a.connected && a.t > def.hit[1] && a.t < def.hit[1] + 0.15) this.flingT = 0.15;
+      this.trailOn = a.t >= def.hit[0] - 0.03 && a.t <= def.hit[1] + 0.05 ? 1 : 0;
+      target = pose;
+      if (a.t >= moveLength(def) || (a.bounced && a.t > def.hit[1] + 0.12)) {
         this.atk = null;
-        this.comboT = 0.45;
+        this.comboT = 0.5;
       }
       this.curPose = { ...target };
     } else {
+      this.trailOn = 0;
       // springy follow when not attacking
       this.curPose.y = damp(this.curPose.y, target.y, 14, dt);
       this.curPose.p = damp(this.curPose.p, target.p, 14, dt);
@@ -552,52 +604,170 @@ export class Player {
       // idle breathing
       this.curPose.p += Math.sin(this.host.time * 1.6) * 0.0015;
     }
+    // angular velocity of the swing drives the body torque on the camera
+    const idt = 1 / Math.max(dt, 1e-3);
+    this.swingYawV = damp(this.swingYawV, (this.curPose.y - this.lastPose.y) * idt, 18, dt);
+    this.swingPitchV = damp(this.swingPitchV, (this.curPose.p - this.lastPose.p) * idt, 18, dt);
+    this.lastPose = { ...this.curPose };
     this.applyPose(this.curPose);
+    this.updateArmsAndTrail(dt);
+  }
+
+  /** Bite: called by the game when the blade connects, so the swing drags through flesh. */
+  bite(amount: number) {
+    if (this.atk) {
+      this.atk.bite = Math.max(this.atk.bite, amount);
+      this.atk.connected = true;
+    }
+  }
+
+  private updateArmsAndTrail(dt: number) {
+    // right arm: shoulder → wrist behind the grip
+    this.vm.updateMatrixWorld(true);
+    const wrist = _v.set(0, -0.012, 0.09).applyMatrix4(this.handGroup.matrix).applyMatrix4(this.pivot.matrix);
+    poseArm(this.armR, wrist);
+    // left arm holds the lantern ring
+    const lw = _w.copy(this.lanternHolder.position).add(_p.set(0.02, 0.1, 0.02));
+    poseArm(this.armL, lw);
+    // trail and blade tip in world space
+    const reach = this.melee.melee!.reach;
+    const base = _p.set(0, 0, -(this.curPose.e + 0.1)).applyMatrix4(this.pivot.matrixWorld);
+    this.bladeTipPrev.copy(this.bladeTip);
+    this.bladeTip.set(0, 0, -(this.curPose.e + 0.1 + reach)).applyMatrix4(this.pivot.matrixWorld);
+    if (!this.trail.mesh.parent && this.host.camera.parent) this.host.camera.parent.add(this.trail.mesh);
+    if (this.trailOn && this.active === 'melee') this.trail.push(base, this.bladeTip);
+    this.trail.update(dt, this.host.bloodiness?.() ?? 0);
+    if (this.flingT > 0) {
+      this.flingT -= dt;
+      const v = _q.subVectors(this.bladeTip, this.bladeTipPrev).divideScalar(Math.max(dt, 1e-3));
+      if (Math.random() < 0.6) this.host.gore.splash(this.bladeTip, v.normalize(), 0.12);
+    }
   }
 
   private atkCharge = 0;
+  executing: { t: number; target: THREE.Vector3; struck: boolean } | null = null;
+  private kickT = 0;
+  private kickCd = 0;
+  private boot = new THREE.Group();
+
+  /** Begin a finishing move on a guard-broken foe. */
+  beginExecution(target: THREE.Vector3) {
+    this.executing = { t: 0, target: target.clone(), struck: false };
+    this.atk = null;
+    this.charge = -1;
+    this.blocking = false;
+    this.iframes = 1.2;
+    if (this.active !== 'melee') {
+      this.active = 'melee';
+      this.showActive();
+    }
+  }
+
+  private updateExecution(dt: number) {
+    const ex = this.executing!;
+    ex.t += dt;
+    const t = ex.t;
+    // turn to face the victim
+    const to = _v.subVectors(ex.target, this.host.camera.position);
+    const wantYaw = Math.atan2(-to.x, -to.z);
+    const wantPitch = Math.atan2(to.y, Math.hypot(to.x, to.z));
+    this.yaw += angleDiff(this.yaw, wantYaw) * Math.min(1, dt * 10);
+    this.pitch = damp(this.pitch, wantPitch, 10, dt);
+    const back: Pose = { y: 0.05, p: 0.25, r: Math.PI / 2, e: 0.12 };
+    const thrust: Pose = { y: 0.0, p: 0.05, r: Math.PI / 2, e: 0.78 };
+    let pose: Pose;
+    if (t < 0.28) pose = lerpPose(this.curPose, back, THREE.MathUtils.smoothstep(t / 0.28, 0, 1), { ...IDLE });
+    else if (t < 0.4) pose = lerpPose(back, thrust, easeStrike((t - 0.28) / 0.12), { ...IDLE });
+    else if (t < 0.85) pose = { ...thrust, p: thrust.p + Math.sin((t - 0.4) * 30) * 0.01 };
+    else pose = lerpPose(thrust, IDLE, THREE.MathUtils.smoothstep((t - 0.85) / 0.35, 0, 1), { ...IDLE });
+    if (!ex.struck && t >= 0.36) {
+      ex.struck = true;
+      this.addTrauma(0.55);
+      this.host.onExecuteStrike();
+    }
+    this.curPose = { ...pose };
+    this.applyPose(pose);
+    if (t > 1.2) this.executing = null;
+  }
+
+  private updateKick(dt: number) {
+    const inp = this.host.input;
+    this.kickCd -= dt;
+    if (this.alive && !this.executing && inp.wasPressed('KeyF') && this.kickCd <= 0 && this.stamina > 5 && this.dodgeT <= 0) {
+      this.kickCd = 0.75;
+      this.kickT = 0.45;
+      this.stamina -= 15;
+      this.staminaDelay = 0.6;
+      audio.play('swing', { pitch: 0.55, vol: 0.7 });
+    }
+    if (this.kickT > 0) {
+      const prev = this.kickT;
+      this.kickT -= dt;
+      if (prev > 0.3 && this.kickT <= 0.3) {
+        const dir = this.forward(new THREE.Vector3()).setY(0).normalize();
+        this.host.onKick(this.pos.clone().addScaledVector(dir, 1.0).setY(this.pos.y + 0.8), dir);
+        this.addTrauma(0.15);
+      }
+    }
+    const k = this.kickT > 0 ? Math.sin(((0.45 - this.kickT) / 0.45) * Math.PI) : 0;
+    this.boot.visible = k > 0.01;
+    this.boot.position.set(0.05, -0.95 + k * 0.55, -0.35 - k * 0.45);
+    this.boot.rotation.x = -0.6 + k * 0.9;
+  }
 
   private applyPose(p: Pose) {
     this.pivot.rotation.set(p.p, p.y, p.r, 'YXZ');
     this.handGroup.position.set(0, 0, -p.e);
   }
 
-  /** Blade sweep between the previous and current pose with sub-stepping. */
-  private sweep(a: AtkState, wind: number, dt: number) {
-    const mv = a.move;
+  /** Blade sweep between the previous and current pose with sub-stepping along the swing curve. */
+  private sweep(a: AtkState, dt: number) {
+    const def = a.def;
     const w = this.melee.melee!;
-    const reach = w.reach * 1.18;
-    const steps = 5;
-    const t0 = Math.max(a.prevT, wind), t1 = a.t;
+    const reach = w.reach * 1.15;
+    const steps = 6;
+    const t0 = Math.max(a.prevT, def.hit[0]), t1 = Math.min(a.t, def.hit[1]);
     const tmpPose: Pose = { ...IDLE };
     const cam = this.host.camera;
     cam.updateMatrixWorld();
     const prevTip = new THREE.Vector3();
-    for (let i = 1; i <= steps; i++) {
+    const span = def.hit[1] - def.hit[0];
+    for (let i = 0; i <= steps; i++) {
       const tt = t0 + ((t1 - t0) * i) / steps;
-      const k = clamp((tt - wind) / mv.act, 0, 1);
-      lerpPose(mv.from, mv.to, easeStrike(k), tmpPose);
+      const k = (tt - def.hit[0]) / span;
+      evalMove(def, tt, a.start, tmpPose);
       this.applyPose(tmpPose);
       this.vm.updateMatrixWorld(true);
       const e = tmpPose.e + 0.08;
       // test from the forearm outward so foes pressed up against you still get hit
       _p.set(0, 0, -tmpPose.e * 0.35).applyMatrix4(this.pivot.matrixWorld);
       _q.set(0, 0, -(e + reach)).applyMatrix4(this.pivot.matrixWorld);
-      if (i === 1) prevTip.copy(_q);
+      if (i === 0) {
+        prevTip.copy(_q);
+        continue;
+      }
+      this.trail.push(_w.set(0, 0, -(e + 0.02)).applyMatrix4(this.pivot.matrixWorld), _q);
       // the blade can hit the ground or scenery and bounce off
       const gh = this.host.world.height(_q.x, _q.z);
       const hitProp = this.host.world.raycastProps(_p, _q) >= 0;
-      if (_q.y < gh - 0.05 || hitProp) {
-        if (k > 0.15 && k < 0.85) {
-          a.bounced = true;
-          audio.play(hitProp ? 'boltWood' : 'hitBlock', { pitch: 0.6 });
-          this.host.gore.sparks(_q, _w.set(0, 1, 0), hitProp ? 6 : 12);
-          this.host.gore.dust(_q, 6);
-          this.host.fog.burst(_q.x, _q.z, 4, 2);
-          this.addTrauma(0.3);
-          this.host.hitstop(0.05);
-          return;
-        }
+      if ((_q.y < gh - 0.05 || hitProp) && k > 0.12 && k < 0.88 && !def.heavy) {
+        a.bounced = true;
+        audio.play(hitProp ? 'boltWood' : 'hitBlock', { pitch: 0.6 });
+        this.host.gore.sparks(_q, _w.set(0, 1, 0), hitProp ? 6 : 12);
+        this.host.gore.dust(_q, 6);
+        this.host.fog.burst(_q.x, _q.z, 4, 2);
+        this.addTrauma(0.3);
+        this.host.hitstop(0.05);
+        return;
+      }
+      if (def.heavy && _q.y < gh - 0.02 && k > 0.5 && !a.bounced) {
+        // a heavy blow drives into the earth: dust, fog blast, shake
+        a.bounced = true;
+        audio.play('swingHeavy', { pitch: 0.35, vol: 0.8 });
+        this.host.gore.dust(_q, 20);
+        this.host.fog.burst(_q.x, _q.z, 10, 4);
+        this.addTrauma(0.45);
+        this.host.hitstop(0.06);
       }
       for (const en of this.host.enemies) {
         if (!en.alive || a.hit.has(en.id)) continue;
@@ -610,8 +780,8 @@ export class Player {
           dir.normalize();
           const riposte = this.riposteT > 0;
           if (riposte) this.riposteT = 0;
-          const heavyMult = mv.heavy ? 1 + this.atkCharge * 0.5 : 1;
-          this.host.onMeleeHit(en, r.seg, r.point, dir.clone(), { heavy: !!mv.heavy, dmgMult: mv.dmg * heavyMult, severMult: mv.sever, riposte });
+          const heavyMult = def.heavy ? 1 + this.atkCharge * 0.5 : 1;
+          this.host.onMeleeHit(en, r.seg, r.point, dir.clone(), { heavy: !!def.heavy, dmgMult: def.dmg * heavyMult, severMult: def.sever, riposte, t: r.t });
         }
       }
       // kick corpses and severed limbs around
@@ -619,7 +789,7 @@ export class Player {
         if (c.rag.pos.length === 0) continue;
         if (c.rag.pos[0].distanceToSquared(this.pos) > 16) continue;
         const dir = _w.subVectors(_q, prevTip).normalize();
-        if (c.push(_q, dir, 3, 0.35)) this.host.gore.splash(_q, dir, 0.15);
+        if (c.push(_q, dir, 3.5, 0.35)) this.host.gore.splash(_q, dir, 0.2);
       }
       // the swing stirs the fog
       const tvx = (_q.x - prevTip.x) / (dt / steps + 1e-4), tvz = (_q.z - prevTip.z) / (dt / steps + 1e-4);
