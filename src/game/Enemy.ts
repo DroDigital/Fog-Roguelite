@@ -8,7 +8,8 @@ import type { Ctx } from './Ctx';
 import { audio } from '../engine/Audio';
 import { angleDiff, clamp, damp, lerp } from '../engine/Random';
 
-export type EnemyKind = 'hollow' | 'stalker' | 'brute';
+export type EnemyKind = 'hollow' | 'stalker' | 'brute' | 'weeper' | 'warden';
+export type AttackKind = 'swipe' | 'slam' | 'sweep' | 'charge' | 'spit';
 
 export interface EnemyDef {
   kind: EnemyKind;
@@ -30,23 +31,36 @@ export interface EnemyDef {
   echoes: number;
   look: CreatureLook;
   voicePitch: number;
+  posture: number;
+  ranged?: boolean;
+  boss?: boolean;
 }
 
 export const ENEMIES: Record<EnemyKind, EnemyDef> = {
   hollow: {
     kind: 'hollow', name: 'Hollow', scale: 1, hp: 70, walk: 1.1, run: 4.1, damage: 13, reach: 1.45, windup: 0.62, strike: 0.16, recover: 0.6,
-    sense: 15, staggerResist: 1, limbHp: 1, crouch: 0.02, xp: 10, echoes: 2, voicePitch: 1,
+    sense: 15, staggerResist: 1, limbHp: 1, crouch: 0.02, xp: 10, echoes: 2, voicePitch: 1, posture: 70,
     look: { id: 'hollow', skin: new THREE.Color(0.85, 0.86, 0.82), eye: new THREE.Color(9, 2.2, 0.35), gaunt: 0.65, bulk: 1, armour: false, cloth: true },
   },
   stalker: {
     kind: 'stalker', name: 'Mist Stalker', scale: 1.06, hp: 48, walk: 1.6, run: 6.4, damage: 10, reach: 1.5, windup: 0.42, strike: 0.2, recover: 0.5,
-    sense: 21, staggerResist: 0.7, limbHp: 0.75, crouch: 0.24, xp: 14, echoes: 3, voicePitch: 1.5,
+    sense: 21, staggerResist: 0.7, limbHp: 0.75, crouch: 0.24, xp: 14, echoes: 3, voicePitch: 1.5, posture: 50,
     look: { id: 'stalker', skin: new THREE.Color(0.62, 0.68, 0.74), eye: new THREE.Color(0.6, 3, 11), gaunt: 1, bulk: 0.82, armour: false, cloth: false },
   },
   brute: {
     kind: 'brute', name: 'Barrow Brute', scale: 1.42, hp: 260, walk: 1.0, run: 3.3, damage: 30, reach: 2.1, windup: 1.0, strike: 0.2, recover: 0.95,
-    sense: 14, staggerResist: 2.6, limbHp: 2.4, crouch: 0.06, xp: 40, echoes: 10, voicePitch: 0.6,
+    sense: 14, staggerResist: 2.6, limbHp: 2.4, crouch: 0.06, xp: 40, echoes: 10, voicePitch: 0.6, posture: 190,
     look: { id: 'brute', skin: new THREE.Color(0.75, 0.66, 0.62), eye: new THREE.Color(12, 0.8, 0.3), gaunt: 0.15, bulk: 1.45, armour: true, cloth: true },
+  },
+  weeper: {
+    kind: 'weeper', name: 'Weeper', scale: 0.98, hp: 55, walk: 1.0, run: 3.4, damage: 11, reach: 14, windup: 0.85, strike: 0.15, recover: 0.7,
+    sense: 24, staggerResist: 0.8, limbHp: 0.8, crouch: 0.16, xp: 16, echoes: 4, voicePitch: 1.25, posture: 45, ranged: true,
+    look: { id: 'weeper', skin: new THREE.Color(0.66, 0.74, 0.6), eye: new THREE.Color(3, 10, 1.2), gaunt: 0.9, bulk: 0.9, armour: false, cloth: true },
+  },
+  warden: {
+    kind: 'warden', name: 'The Drowned Warden', scale: 2.05, hp: 1500, walk: 1.2, run: 3.6, damage: 34, reach: 3.1, windup: 0.95, strike: 0.22, recover: 0.8,
+    sense: 60, staggerResist: 6, limbHp: 5, crouch: 0.04, xp: 250, echoes: 120, voicePitch: 0.42, posture: 600, boss: true,
+    look: { id: 'warden', skin: new THREE.Color(0.5, 0.52, 0.56), eye: new THREE.Color(5, 9, 22), gaunt: 0.3, bulk: 1.35, armour: true, cloth: true },
   },
 };
 
@@ -113,7 +127,7 @@ export class Corpse {
   }
 }
 
-type AIState = 'idle' | 'wander' | 'lurk' | 'chase' | 'attack' | 'stagger' | 'dead';
+type AIState = 'idle' | 'wander' | 'lurk' | 'chase' | 'attack' | 'stagger' | 'broken' | 'dead';
 
 const _a = new THREE.Vector3();
 const _b = new THREE.Vector3();
@@ -152,6 +166,16 @@ export class Enemy {
   private flinch = new THREE.Vector3();
   private flinchV = new THREE.Vector3();
   private lunge = 0;
+  private speed = 0;
+  posture = 0;
+  private postureCool = 0;
+  brokenT = 0;
+  atkKind: AttackKind = 'swipe';
+  private aw = 1;
+  private as = 0.2;
+  private ar = 1;
+  private atkCooldown = 0;
+  private summoned = 0;
   bleed = 0;
   bleedT = 0;
   staggerT = 0;
@@ -230,20 +254,21 @@ export class Enemy {
     let atkRaise = 0, atkStrike = 0;
     if (this.state === 'attack') {
       const t = this.attackT;
-      if (t < d.windup) atkRaise = THREE.MathUtils.smoothstep(t / d.windup, 0, 1);
-      else if (t < d.windup + d.strike) {
-        const k = (t - d.windup) / d.strike;
+      if (t < this.aw) atkRaise = THREE.MathUtils.smoothstep(t / this.aw, 0, 1);
+      else if (t < this.aw + this.as) {
+        const k = (t - this.aw) / this.as;
         atkRaise = 1 - k;
         atkStrike = Math.sin(k * Math.PI * 0.5);
       } else {
-        const k = (t - d.windup - d.strike) / d.recover;
+        const k = (t - this.aw - this.as) / this.ar;
         atkStrike = 1 - THREE.MathUtils.smoothstep(k, 0, 1);
       }
     }
     const stag = this.state === 'stagger' ? Math.min(1, this.staggerT * 2) : 0;
-    const crouch = d.crouch * S + atkRaise * (d.kind === 'stalker' ? 0.18 : 0.04) * S;
+    const kneel = this.state === 'broken' ? Math.min(1, (3.2 - this.brokenT) * 4) : 0;
+    const crouch = d.crouch * S + atkRaise * (d.kind === 'stalker' || d.kind === 'weeper' ? 0.18 : 0.04) * S + kneel * 0.42 * S;
     const bob = Math.abs(Math.sin(ph)) * 0.05 * S * (0.3 + runN);
-    const lean = 0.12 + runN * 0.35 + d.crouch * 1.2 + atkStrike * 0.35 - atkRaise * 0.15 - stag * 0.4;
+    const lean = 0.12 + runN * 0.35 + d.crouch * 1.2 + atkStrike * 0.35 - atkRaise * (d.kind === 'weeper' ? 0.55 : 0.15) - stag * 0.4 + kneel * 0.75;
     const sway = Math.sin(ph * 0.5) * 0.04 * S;
 
     const pelvisY = REST[J.Pelvis][1] * S - crouch - bob;
@@ -275,7 +300,7 @@ export class Enemy {
       const hip = side < 0 ? this.joints[J.LHip] : this.joints[J.RHip];
       const foot = side < 0 ? this.joints[J.LFt] : this.joints[J.RFt];
       const knee = side < 0 ? this.joints[J.LKn] : this.joints[J.RKn];
-      const z = Math.sin(p) * stride + (stag > 0 ? -0.15 * S : 0);
+      const z = Math.sin(p) * stride + (stag > 0 ? -0.15 * S : 0) + kneel * (side < 0 ? 0.35 : -0.25) * S;
       const lifted = Math.max(0, Math.cos(p)) * lift;
       L(side * 0.13 * S, 0, z, foot);
       foot.y = this.ctx.world.height(foot.x, foot.z) + 0.07 * S + lifted;
@@ -297,13 +322,22 @@ export class Enemy {
       hy = lerp(hy, -0.25 * S, reach);
       hz = lerp(hz, 0.55 * S, reach);
       // attack: right arm (or both for brute) raises then rakes down
-      const attacking = side > 0 || d.kind === 'brute' || (side < 0 && !this.segAlive[5]);
+      const twoHanded = d.kind === 'brute' || d.kind === 'warden' || d.kind === 'weeper' || this.atkKind === 'slam';
+      const attacking = side > 0 || twoHanded || (side < 0 && !this.segAlive[5]);
       if (attacking && (atkRaise > 0 || atkStrike > 0)) {
-        const rx = d.kind === 'brute' ? side * 0.1 : side * 0.15, ry = 0.5 * S, rz = -0.1 * S;
-        const sx = d.kind === 'brute' ? side * 0.05 : -side * 0.25, sy = -0.45 * S, sz = 0.6 * S;
+        let rx = twoHanded ? side * 0.1 : side * 0.15, ry = 0.5 * S, rz = -0.1 * S;
+        let sx = twoHanded ? side * 0.05 : -side * 0.25, sy = -0.45 * S, sz = 0.6 * S;
+        if (this.atkKind === 'sweep') { rx = side * 0.7 * S; ry = 0.05 * S; rz = -0.3 * S; sx = -side * 0.6 * S; sy = -0.15 * S; sz = 0.55 * S; }
+        if (this.atkKind === 'spit') { rx = side * 0.25; ry = 0.3 * S; rz = 0.1 * S; sx = side * 0.2; sy = 0.05 * S; sz = 0.55 * S; }
+        if (this.atkKind === 'charge') { rx = side * 0.3; ry = -0.1 * S; rz = 0.45 * S; sx = side * 0.2; sy = -0.05 * S; sz = 0.7 * S; }
         hx = lerp(lerp(hx, rx, atkRaise), sx, atkStrike);
         hy = lerp(lerp(hy, ry, atkRaise), sy, atkStrike);
         hz = lerp(lerp(hz, rz, atkRaise), sz, atkStrike);
+      }
+      if (kneel > 0) {
+        hx = lerp(hx, side * 0.12, kneel);
+        hy = lerp(hy, -(l1 + l2) * 0.75, kneel);
+        hz = lerp(hz, 0.25 * S, kneel);
       }
       if (stag > 0) {
         hx += side * 0.25 * stag;
@@ -403,9 +437,34 @@ export class Enemy {
           break;
         }
         targetYaw = desiredYaw;
-        const slowRange = d.reach + 0.6;
-        targetSpeed = dist > slowRange ? d.run * (1 + ctx.difficulty * 0.05) : d.walk * 0.5;
-        if (dist < d.reach + 0.35 && Math.abs(angleDiff(this.yaw, desiredYaw)) < 0.5) this.beginAttack();
+        this.atkCooldown -= dt;
+        const facing = Math.abs(angleDiff(this.yaw, desiredYaw)) < 0.5;
+        if (d.ranged) {
+          // keep a distance and lob bile; back away when pressed
+          if (dist < 7) {
+            targetYaw = desiredYaw + Math.PI + Math.sin(this.ctx.time + this.id) * 0.6;
+            targetSpeed = d.run;
+          } else if (dist > 17) targetSpeed = d.run;
+          else targetSpeed = d.walk * 0.4;
+          if (dist < 20 && dist > 4 && facing && this.atkCooldown <= 0) this.beginAttack('spit');
+          else if (dist < 2 && this.atkCooldown <= 0) this.beginAttack('swipe');
+        } else if (d.boss) {
+          targetSpeed = dist > d.reach + 0.4 ? d.run : d.walk * 0.4;
+          if (this.atkCooldown <= 0) {
+            if (dist > 6 && dist < 12.5 && facing) this.beginAttack('charge');
+            else if (dist < d.reach + 0.6 && facing) this.beginAttack(Math.random() < 0.5 ? 'slam' : 'sweep');
+          }
+          const frac = this.hp / this.maxHp;
+          if ((frac < 0.66 && this.summoned === 0) || (frac < 0.33 && this.summoned === 1)) {
+            this.summoned++;
+            ctx.summon(this.pos, 3 + this.summoned * 2);
+            this.beginAttack('slam');
+          }
+        } else {
+          const slowRange = d.reach + 0.6;
+          targetSpeed = dist > slowRange ? d.run * (1 + ctx.difficulty * 0.05) : d.walk * 0.5;
+          if (dist < d.reach + 0.35 && facing && this.atkCooldown <= 0) this.beginAttack(d.kind === 'brute' ? 'slam' : 'swipe');
+        }
         // lose interest when far away
         if (dist > 60) {
           this.state = 'wander';
@@ -416,18 +475,34 @@ export class Enemy {
       case 'attack': {
         this.attackT += dt;
         const t = this.attackT;
-        if (t < d.windup * 0.8) targetYaw = desiredYaw;
-        if (d.kind === 'stalker' && t > d.windup && t < d.windup + d.strike) this.lunge = 7;
-        if (!this.struck && t >= d.windup + d.strike * 0.5) {
+        if (t < this.aw * 0.8) targetYaw = desiredYaw;
+        if (d.kind === 'stalker' && t > this.aw && t < this.aw + this.as) this.lunge = 7;
+        if (this.atkKind === 'charge' && t > this.aw && t < this.aw + this.as) {
+          this.lunge = 13;
+          ctx.fog.splat(this.pos.x, this.pos.z, this.vel.x * 0.6, this.vel.z * 0.6, 2.5, 0.2);
+          if (!this.struck && dist < 2.8) {
+            this.struck = true;
+            this.resolveHit(ctx.damagePlayer(this.dmg() * 0.8, this.joints[J.Chest], { knock: 9 }));
+          }
+        }
+        if (!this.struck && this.atkKind !== 'charge' && t >= this.aw + this.as * 0.5) {
           this.struck = true;
           this.strike(dist, desiredYaw);
         }
-        if (t > d.windup + d.strike + d.recover) {
+        if (t > this.aw + this.as + this.ar) {
           this.state = 'chase';
           this.stateT = 0;
         }
         break;
       }
+      case 'broken':
+        this.brokenT -= dt;
+        if (this.brokenT <= 0) {
+          this.posture = 0;
+          this.state = 'chase';
+          this.stateT = 0;
+        }
+        break;
       case 'stagger':
         this.staggerT -= dt;
         if (this.staggerT <= 0) {
@@ -440,14 +515,16 @@ export class Enemy {
     // locomotion
     this.yaw += angleDiff(this.yaw, targetYaw) * Math.min(1, dt * (this.state === 'attack' ? 4 : 6));
     const fwd = this.forward(_fwd);
-    const sp = Math.hypot(this.vel.x, this.vel.z);
-    const nsp = damp(sp, targetSpeed, 5, dt);
+    const nsp = (this.speed = damp(this.speed, targetSpeed, 5, dt));
     this.vel.x = fwd.x * nsp + fwd.x * this.lunge;
     this.vel.z = fwd.z * nsp + fwd.z * this.lunge;
     this.lunge = damp(this.lunge, 0, 6, dt);
-    if (this.state === 'stagger') {
-      this.vel.multiplyScalar(0.3);
+    if (this.state === 'stagger' || this.state === 'broken') {
+      this.vel.multiplyScalar(this.state === 'broken' ? 0 : 0.3);
     }
+    // posture recovers when left alone
+    this.postureCool -= dt;
+    if (this.postureCool <= 0 && this.state !== 'broken') this.posture = Math.max(0, this.posture - d.posture * 0.12 * dt);
     this.pos.x += this.vel.x * dt;
     this.pos.z += this.vel.z * dt;
     ctx.world.collide(this.pos, 0.35 * d.scale);
@@ -484,10 +561,18 @@ export class Enemy {
     audio.play('enemyScream', { dist: s.dist * 0.6, pan: s.pan, pitch: this.def.voicePitch });
   }
 
-  private beginAttack() {
+  private beginAttack(kind: AttackKind = 'swipe') {
+    const d = this.def;
     this.state = 'attack';
     this.attackT = 0;
     this.struck = false;
+    this.atkKind = kind;
+    const m = kind === 'sweep' ? [1.15, 1.4, 1.0] : kind === 'charge' ? [0.9, 4, 0.9] : kind === 'spit' ? [1, 1, 1] : [1, 1, 1];
+    const haste = 1 / (1 + this.ctx.difficulty * 0.08);
+    this.aw = d.windup * m[0] * haste;
+    this.as = d.strike * m[1];
+    this.ar = d.recover * m[2] * haste;
+    this.atkCooldown = d.ranged ? 2.2 + Math.random() * 1.5 : d.boss ? 0.6 + Math.random() * 0.8 : 0.15;
     const s = this.ctx.pan(this.joints[J.Head]);
     audio.play('enemyAttack', { dist: s.dist, pan: s.pan, pitch: this.def.voicePitch });
   }
@@ -495,8 +580,22 @@ export class Enemy {
   private strike(dist: number, desiredYaw: number) {
     const d = this.def;
     const ctx = this.ctx;
-    const inArc = Math.abs(angleDiff(this.yaw, desiredYaw)) < 1.1;
-    if (d.kind === 'brute') {
+    const inArc = Math.abs(angleDiff(this.yaw, desiredYaw)) < (this.atkKind === 'sweep' ? 1.9 : 1.1);
+    if (this.atkKind === 'spit') {
+      const from = _b.copy(this.joints[J.Head]);
+      const target = _c.copy(ctx.playerEye).add(_a.set(0, -0.5, 0));
+      const flight = Math.max(0.4, from.distanceTo(target) / 15);
+      const vel = new THREE.Vector3().subVectors(target, from).divideScalar(flight);
+      vel.y += 0.5 * 9.81 * 0.6 * flight; // arc (projectile gravity is 0.6g)
+      ctx.spawnBile(from.clone(), vel, this.dmg());
+      return;
+    }
+    if (this.atkKind === 'sweep') {
+      ctx.fog.burst(this.pos.x, this.pos.z, 7, d.reach * 1.5);
+      if (dist < d.reach + 0.9 && inArc) this.resolveHit(ctx.damagePlayer(this.dmg(), this.joints[J.Chest], { knock: 7 }));
+      return;
+    }
+    if (this.atkKind === 'slam') {
       const fwd = this.forward(_fwd);
       const impact = _b.copy(this.pos).addScaledVector(fwd, 1.6 * d.scale);
       ctx.fog.burst(impact.x, impact.z, 9, 6);
@@ -514,14 +613,46 @@ export class Enemy {
   }
 
   private resolveHit(r: string) {
-    if (r === 'parried') this.stagger(1.4);
+    if (r === 'parried') {
+      this.addPosture(this.def.posture * 0.45);
+      if (this.state !== 'broken') this.stagger(this.def.boss ? 0.8 : 1.4);
+    }
     else if (r === 'blocked') {
-      this.attackT = Math.max(this.attackT, this.def.windup + this.def.strike + this.def.recover * 0.3);
+      this.attackT = Math.max(this.attackT, this.aw + this.as + this.ar * 0.3);
+      this.addPosture(this.def.posture * 0.08);
     }
   }
 
-  stagger(t: number) {
+  addPosture(n: number) {
+    if (this.state === 'dead' || this.state === 'broken') return;
+    this.posture += n;
+    this.postureCool = 2.2;
+    if (this.posture >= this.def.posture) {
+      this.posture = this.def.posture;
+      this.state = 'broken';
+      this.brokenT = this.def.boss ? 4 : 3.2;
+      this.stateT = 0;
+      const s = this.ctx.pan(this.joints[J.Head]);
+      audio.play('enemyScream', { dist: s.dist, pan: s.pan, pitch: this.def.voicePitch * 0.7 });
+    }
+  }
+
+  /** Boot to the chest: shove back, stagger and posture damage. */
+  kicked(dir: THREE.Vector3, power: number) {
     if (this.state === 'dead') return;
+    const push = power / this.def.staggerResist;
+    this.pos.addScaledVector(_a.copy(dir).setY(0).normalize(), Math.min(1.4, push * 0.7));
+    this.flinchV.addScaledVector(dir, 3 / this.def.staggerResist);
+    this.addPosture(this.def.posture * 0.22 * power);
+    if (this.state !== 'broken' && !this.def.boss) this.stagger(0.55);
+  }
+
+  get canBeExecuted() {
+    return this.state === 'broken';
+  }
+
+  stagger(t: number) {
+    if (this.state === 'dead' || this.state === 'broken') return;
     this.state = 'stagger';
     this.staggerT = t;
     this.stateT = 0;
@@ -569,6 +700,8 @@ export class Enemy {
     // limb damage & severing
     if (def.part !== 'torso') {
       this.segHp[h.seg] -= h.damage * h.sever;
+      // a boss keeps its head until it is nearly spent
+      if (this.def.boss && def.part === 'head' && this.hp / this.maxHp > 0.25) this.segHp[h.seg] = Math.max(this.segHp[h.seg], 1);
       if (this.segHp[h.seg] <= 0) {
         if (!h.blunt) {
           this.sever(h.seg, h.dir, h.source === 'bolt' ? 3 : 4.5);
@@ -581,12 +714,15 @@ export class Enemy {
     }
     ctx.gore.splash(h.point, _a.copy(h.dir).add(_b.set(0, 0.3, 0)).normalize(), severed ? 1.4 : h.crit ? 1 : 0.6);
     const headshot = def.part === 'head';
-    if (severed && (def.part === 'head' || def.part === 'thigh' || def.part === 'shin')) {
+    if (severed && (def.part === 'head' || ((def.part === 'thigh' || def.part === 'shin') && !this.def.boss))) {
       this.die(h.dir, { severed: true, head: headshot, crit: h.crit });
       return { killed: true, severed, headshot };
     }
     const killed = this.damage(dmg, h.point, h.dir, h.source, h.crit, severed);
-    if (!killed && h.stagger * dmg > 28 * this.def.staggerResist) this.stagger(0.45 + h.stagger * 0.15);
+    if (!killed) {
+      this.addPosture((dmg * h.stagger * 0.55) / Math.sqrt(this.def.staggerResist) * (h.riposte ? 2 : 1));
+      if (h.stagger * dmg > 28 * this.def.staggerResist) this.stagger(0.45 + h.stagger * 0.15);
+    }
     return { killed, severed, headshot };
   }
 

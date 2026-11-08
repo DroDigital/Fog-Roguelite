@@ -42,6 +42,8 @@ export interface PlayerHost {
   hitstop(t: number): void;
   onMeleeHit(e: Enemy, seg: number, point: THREE.Vector3, dir: THREE.Vector3, move: { heavy: boolean; dmgMult: number; severMult: number; riposte: boolean }): void;
   onPlayerDeath(): void;
+  onKick(origin: THREE.Vector3, dir: THREE.Vector3): void;
+  onExecuteStrike(): void;
   notify(msg: string): void;
 }
 
@@ -140,6 +142,15 @@ export class Player {
     this.light.shadow.camera.near = 0.1;
     this.light.shadow.camera.far = 22;
     this.light.shadow.bias = -0.004;
+    const shin = new THREE.Mesh(new THREE.CylinderGeometry(0.06, 0.075, 0.5, 8), mats.leather);
+    shin.position.y = 0.25;
+    const sole = new THREE.Mesh(new THREE.BoxGeometry(0.13, 0.1, 0.3), mats.leather);
+    sole.position.set(0, -0.02, -0.08);
+    const plate = new THREE.Mesh(new THREE.BoxGeometry(0.14, 0.2, 0.04), mats.darkSteel);
+    plate.position.set(0, 0.25, -0.08);
+    this.boot.add(shin, sole, plate);
+    this.boot.visible = false;
+    this.vm.add(this.boot);
   }
 
   setFov(f: number) {
@@ -290,7 +301,7 @@ export class Player {
     const world = this.host.world;
 
     // look (uses real dt so hitstop never freezes the mouse)
-    if (this.alive) {
+    if (this.alive && !this.executing) {
       const sens = 0.0022 * inp.sensitivity * (this.aim > 0.5 ? 0.6 : 1);
       this.yaw -= inp.mouseDX * sens;
       this.pitch -= inp.mouseDY * sens;
@@ -306,6 +317,7 @@ export class Player {
       if (inp.isDown('KeyA')) mx -= 1;
       if (inp.isDown('KeyD')) mx += 1;
     }
+    if (this.executing) mx = mz = 0;
     const ml = Math.hypot(mx, mz);
     if (ml > 0) {
       mx /= ml;
@@ -327,7 +339,7 @@ export class Player {
     }
 
     // dodge
-    if (this.alive && inp.wasPressed('Space') && this.dodgeT <= 0 && this.stamina >= s.dodgeCost * 0.5 && this.staggerT <= 0) {
+    if (this.alive && !this.executing && inp.wasPressed('Space') && this.dodgeT <= 0 && this.stamina >= s.dodgeCost * 0.5 && this.staggerT <= 0) {
       this.stamina -= s.dodgeCost;
       this.staminaDelay = 0.8;
       if (ml > 0) this.dodgeDir.set(wishX, 0, wishZ);
@@ -426,7 +438,9 @@ export class Player {
     }
     this.swapT = Math.max(0, this.swapT - dt);
 
-    if (this.active === 'melee') this.updateMelee(dt);
+    this.updateKick(dt);
+    if (this.executing) this.updateExecution(dt);
+    else if (this.active === 'melee') this.updateMelee(dt);
     else this.updateRanged(dt);
 
     // ── camera
@@ -556,6 +570,75 @@ export class Player {
   }
 
   private atkCharge = 0;
+  executing: { t: number; target: THREE.Vector3; struck: boolean } | null = null;
+  private kickT = 0;
+  private kickCd = 0;
+  private boot = new THREE.Group();
+
+  /** Begin a finishing move on a guard-broken foe. */
+  beginExecution(target: THREE.Vector3) {
+    this.executing = { t: 0, target: target.clone(), struck: false };
+    this.atk = null;
+    this.charge = -1;
+    this.blocking = false;
+    this.iframes = 1.2;
+    if (this.active !== 'melee') {
+      this.active = 'melee';
+      this.showActive();
+    }
+  }
+
+  private updateExecution(dt: number) {
+    const ex = this.executing!;
+    ex.t += dt;
+    const t = ex.t;
+    // turn to face the victim
+    const to = _v.subVectors(ex.target, this.host.camera.position);
+    const wantYaw = Math.atan2(-to.x, -to.z);
+    const wantPitch = Math.atan2(to.y, Math.hypot(to.x, to.z));
+    this.yaw += angleDiff(this.yaw, wantYaw) * Math.min(1, dt * 10);
+    this.pitch = damp(this.pitch, wantPitch, 10, dt);
+    const back: Pose = { y: 0.05, p: 0.25, r: Math.PI / 2, e: 0.12 };
+    const thrust: Pose = { y: 0.0, p: 0.05, r: Math.PI / 2, e: 0.78 };
+    let pose: Pose;
+    if (t < 0.28) pose = lerpPose(this.curPose, back, THREE.MathUtils.smoothstep(t / 0.28, 0, 1), { ...IDLE });
+    else if (t < 0.4) pose = lerpPose(back, thrust, easeStrike((t - 0.28) / 0.12), { ...IDLE });
+    else if (t < 0.85) pose = { ...thrust, p: thrust.p + Math.sin((t - 0.4) * 30) * 0.01 };
+    else pose = lerpPose(thrust, IDLE, THREE.MathUtils.smoothstep((t - 0.85) / 0.35, 0, 1), { ...IDLE });
+    if (!ex.struck && t >= 0.36) {
+      ex.struck = true;
+      this.addTrauma(0.55);
+      this.host.onExecuteStrike();
+    }
+    this.curPose = { ...pose };
+    this.applyPose(pose);
+    if (t > 1.2) this.executing = null;
+  }
+
+  private updateKick(dt: number) {
+    const inp = this.host.input;
+    this.kickCd -= dt;
+    if (this.alive && !this.executing && inp.wasPressed('KeyF') && this.kickCd <= 0 && this.stamina > 5 && this.dodgeT <= 0) {
+      this.kickCd = 0.75;
+      this.kickT = 0.45;
+      this.stamina -= 15;
+      this.staminaDelay = 0.6;
+      audio.play('swing', { pitch: 0.55, vol: 0.7 });
+    }
+    if (this.kickT > 0) {
+      const prev = this.kickT;
+      this.kickT -= dt;
+      if (prev > 0.3 && this.kickT <= 0.3) {
+        const dir = this.forward(new THREE.Vector3()).setY(0).normalize();
+        this.host.onKick(this.pos.clone().addScaledVector(dir, 1.0).setY(this.pos.y + 0.8), dir);
+        this.addTrauma(0.15);
+      }
+    }
+    const k = this.kickT > 0 ? Math.sin(((0.45 - this.kickT) / 0.45) * Math.PI) : 0;
+    this.boot.visible = k > 0.01;
+    this.boot.position.set(0.05, -0.95 + k * 0.55, -0.35 - k * 0.45);
+    this.boot.rotation.x = -0.6 + k * 0.9;
+  }
 
   private applyPose(p: Pose) {
     this.pivot.rotation.set(p.p, p.y, p.r, 'YXZ');

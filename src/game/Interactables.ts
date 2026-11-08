@@ -22,7 +22,7 @@ export interface LightSource {
 
 export interface Interactable {
   id: string;
-  kind: 'chest' | 'shrine' | 'altar' | 'lantern' | 'weapon';
+  kind: 'chest' | 'shrine' | 'altar' | 'lantern' | 'weapon' | 'beacon';
   pos: THREE.Vector3;
   obj: THREE.Object3D;
   used: boolean;
@@ -127,6 +127,21 @@ export function createInteractable(poi: POI, tex: TextureGen, used: boolean): In
       obj.add(flame);
       const it: Interactable = { id: poi.id, kind: 'lantern', pos, obj, used: true, tier: 0, anim: 0, label: () => '' };
       it.light = { pos: pos.clone(), color: new THREE.Color(1, 0.62, 0.3), intensity: 7, radius: 12, flicker: 0.2, real: true };
+      return it;
+    }
+    case 'beacon': {
+      const flame = new THREE.Mesh(new THREE.SphereGeometry(0.75, 12, 10), new THREE.MeshBasicMaterial({ color: new THREE.Color(9, 3.2, 0.7) }));
+      flame.position.set(0, 7.7, 0);
+      flame.scale.set(1, 1.7, 1);
+      flame.name = 'flame';
+      flame.visible = used;
+      obj.rotation.set(0, 0, 0);
+      obj.add(flame);
+      const it: Interactable = {
+        id: poi.id, kind: 'beacon', pos, obj, used, tier: 3, anim: 0,
+        label: () => (it.used ? '' : 'Kindle the Beacon  (the fog will answer)'),
+      };
+      it.light = { pos: pos.clone().add(new THREE.Vector3(0, 7.8, 0)), color: new THREE.Color(1, 0.5, 0.18), intensity: used ? 60 : 0, radius: 34, flicker: 0.2, real: true };
       return it;
     }
     case 'lair':
