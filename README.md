@@ -86,12 +86,19 @@ shrines, blood altars and dormant creature lairs.
   - Head blows leave them dazed.
   - Deep belly cuts spill entrails, which dangle and drag on the ground.
   - Bodies bleed out into spreading pools.
-- *Swings.* Every attack is a keyframed curve: anticipation, a slow load, a strike that accelerates through the
-  target, an overshooting follow-through where the wrist rolls over, then a settle.
-  - The camera leans into the swing, and you step into each strike.
+- *Swings.* The sword hand is posed directly (fist position, blade direction, wrist roll) on a torso that
+  twists and leans, rather than the weapon pivoting around a fixed point. The fist travels a short arc while
+  the tip whips through a long one. Each cut runs chamber → release → impact → follow-through → recovery arc.
+  - Keys are authored in screen space (where the fist sits, where the blade points, which way the edge faces),
+    so the whole swing stays in frame. Every pose is clamped to the arm's reach so the fist never detaches.
+  - During the strike the wrist turns the nearer edge into the line of travel, so cuts land edge-first.
+  - A spring layer adds weight: the blade shudders as it catches in flesh, and jars back along its path off stone
+    or wood. The guard breathes, shifts its weight, bobs with your steps, and drops low while sprinting.
+  - The camera leans with the torso, and you step into each strike.
   - The blade drags as it bites through flesh before tearing free, and flicks blood off in the follow-through.
   - A faint trail marks its path.
-  - Gauntleted arms hold the sword and lantern, solved with IK. Decapitation and
+  - The fist is curled around the grip in a hammer grip, with the forearm meeting it from behind the back
+    edge. The arm has a quilted sleeve, a strapped bracer and a vambrace, and is solved with IK. Decapitation and
   severed legs are lethal. Blunt weapons crush skulls instead of cutting. On death the whole body becomes a
   ragdoll that you can keep hacking at.
 - *Feel.* Hit-stop, trauma-based camera shake, view-model sway and recoil, blood that builds up on your blade,
